@@ -4,6 +4,10 @@ Status: proposed. Scope: the smallest factory that works end to end. A ticket
 goes in, an agent works on it, a pull request comes out, and a person can watch
 and steer.
 
+Build order: the first implementation is Docker only. The Kubernetes runner and
+manifests are designed here and deferred to a follow-up task. The design keeps
+both platforms in view so that task adds one runner and nothing else.
+
 ## Summary
 
 Fledge is one control-plane process plus one short-lived container per step.
@@ -13,8 +17,8 @@ Fledge is one control-plane process plus one short-lived container per step.
 - Each **step** runs in its own container (`fledge step-exec`). Steps in one run
   share a workspace volume. The step container talks back to the control plane
   over HTTP to report events, collect guidance and post its result.
-- The **runner** is the only platform-specific code. It has a Docker
-  implementation and a Kubernetes implementation behind one small interface.
+- The **runner** is the only platform-specific code: a Docker implementation
+  first, and a Kubernetes implementation later, behind one small interface.
 
 Choices made here, with the reason for each:
 
@@ -32,7 +36,8 @@ Choices made here, with the reason for each:
 | FastAPI, psycopg 3, plain SQL migrations, server-rendered HTML | Small, typed, no ORM and no frontend build. |
 
 Proposed dependencies (none are added yet; each needs sign-off): `fastapi`,
-`uvicorn`, `jinja2`, `psycopg`, `pydantic`, `httpx`, `docker`, `kubernetes`.
+`uvicorn`, `jinja2`, `psycopg`, `pydantic`, `httpx`, `docker`. The Kubernetes
+task adds `kubernetes`.
 
 ## 1. Components
 
@@ -44,7 +49,7 @@ Proposed dependencies (none are added yet; each needs sign-off): `fastapi`,
 | Harness | Adapter around one coding agent CLI. Runs one agent turn and can resume the same session. | Yes |
 | Poller | Calls each configured trigger on an interval. Creates runs for new work and guidance rows for new comments. | Fixed |
 | Orchestrator | Reconcile loop. Starts pending runs up to the concurrency limit, starts the next step, records outcomes, handles cancel and timeouts. | Fixed |
-| Runner | Creates the run workspace, starts and stops step containers, reports container state. Docker and Kubernetes implementations. | Fixed |
+| Runner | Creates the run workspace, starts and stops step containers, reports container state. Docker first; Kubernetes deferred. | Fixed |
 | Step executor | Entrypoint inside the step container (`fledge step-exec`). Loads the step, builds its context, runs it, reports the result. | Fixed |
 | API and web view | Public API for runs, cancel, guidance and manual launch. Internal API for step containers. The web view is a thin page over the public API. | Fixed |
 | Store | Postgres schema and queries. | Fixed |
@@ -374,7 +379,6 @@ One image runs everywhere. `fledge serve` is the control plane and
 `fledge.toml`, plus `DATABASE_URL` and secrets in the environment:
 
 ```toml
-runner = "docker"            # or "kubernetes"
 image = "ghcr.io/acme/fledge-acme:1"
 max_concurrent_runs = 1
 poll_interval_seconds = 30
@@ -405,7 +409,11 @@ The local flow:
 
 No Kubernetes is involved at any point.
 
-### Kubernetes
+### Kubernetes (designed, deferred)
+
+Not part of the first implementation. This section is the target the Docker
+build must not rule out. The Kubernetes task also adds a `runner` key to
+`fledge.toml` to choose the platform.
 
 Plain manifests, applied with `kubectl apply -k`:
 
@@ -445,8 +453,11 @@ class Runner(Protocol):
     async def delete_workspace(self, run_id: UUID) -> None: ...
 ```
 
-This is an internal seam between two shipped implementations, not a supported
-extension point.
+This is an internal seam, not a supported extension point. The first
+implementation has only the Docker runner, and it must stay within these five
+operations: no host bind mounts, no reading results from container logs, and
+no state kept outside Postgres and the workspace volume. Those shortcuts are
+what would turn the Kubernetes runner into a rewrite.
 
 ## 5. Risks and open questions
 
@@ -508,6 +519,10 @@ Out of scope by instruction, with where each touches this design:
   agent-reachable containers, changes those two places.
 - **Tying approvals to commits.** `OpenPullRequest` already returns `head_sha`
   as an output for a later approval mechanism to bind to.
+
+Designed here and deferred:
+
+- **Kubernetes runner and manifests**, as described in section 4.
 
 Left out by choice:
 
