@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from fledge.builtin.claude_code import ClaudeCodeHarness
-from fledge.builtin.codex import CodexHarness
+from fledge.builtin.harnesses.claude_code import ClaudeCodeHarness
+from fledge.builtin.harnesses.codex import CodexHarness
 from fledge.core import Harness
 
 FAKE_CLI = """\

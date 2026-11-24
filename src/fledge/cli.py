@@ -8,7 +8,6 @@ from pathlib import Path
 import httpx
 import uvicorn
 
-from fledge.api import create_app
 from fledge.config import Config, load_config
 from fledge.db import migrate
 from fledge.executor import execute_from_env
@@ -17,6 +16,7 @@ from fledge.poller import Poller, load_triggers
 from fledge.registry import load_workflow
 from fledge.runner.docker import DockerRunner
 from fledge.store import Store
+from fledge.web.app import create_app
 
 logger = logging.getLogger(__name__)
 

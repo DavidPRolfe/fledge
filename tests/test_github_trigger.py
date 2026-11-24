@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from fledge.builtin.github import GitHubIssuesTrigger, MissingTokenError
+from fledge.builtin.triggers.github_issues import GitHubIssuesTrigger, MissingTokenError
 from fledge.core import Comment, Trigger, WorkItem
 
 Handler = Callable[[httpx.Request], httpx.Response]

@@ -5,10 +5,10 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from fledge.api import create_app
 from fledge.config import Config, TriggerConfig
 from fledge.core import Comment, WorkItem
 from fledge.store import Run, StepRun, Store, hash_token
+from fledge.web.app import create_app
 
 pytestmark = pytest.mark.anyio
 

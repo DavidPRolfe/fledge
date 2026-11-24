@@ -8,8 +8,10 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from fledge.builtin.steps import AgentStep, CloneRepo, OpenPullRequest
-from fledge.builtin.workflows import ticket_to_pr
+from fledge.builtin.steps.agent import AgentStep
+from fledge.builtin.steps.clone_repo import CloneRepo
+from fledge.builtin.steps.open_pull_request import OpenPullRequest
+from fledge.builtin.workflows.ticket_to_pr import ticket_to_pr
 from fledge.core import Harness, TurnResult, WorkItem
 
 GITHUB_CREDENTIAL = "ghp_test_credential"

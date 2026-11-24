@@ -1,6 +1,6 @@
-"""The built-in workflows."""
-
-from fledge.builtin.steps import AgentStep, CloneRepo, OpenPullRequest
+from fledge.builtin.steps.agent import AgentStep
+from fledge.builtin.steps.clone_repo import CloneRepo
+from fledge.builtin.steps.open_pull_request import OpenPullRequest
 from fledge.core import Workflow
 
 IMPLEMENT = """\

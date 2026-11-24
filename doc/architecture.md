@@ -210,14 +210,14 @@ point groups in that package's `pyproject.toml`:
 
 ```toml
 [project.entry-points."fledge.triggers"]
-github_issues = "fledge.builtin.github:GitHubIssuesTrigger"
+github_issues = "fledge.builtin.triggers.github_issues:GitHubIssuesTrigger"
 
 [project.entry-points."fledge.workflows"]
-ticket_to_pr = "fledge.builtin.workflows:ticket_to_pr"
+ticket_to_pr = "fledge.builtin.workflows.ticket_to_pr:ticket_to_pr"
 
 [project.entry-points."fledge.harnesses"]
-claude_code = "fledge.builtin.claude_code:ClaudeCodeHarness"
-codex = "fledge.builtin.codex:CodexHarness"
+claude_code = "fledge.builtin.harnesses.claude_code:ClaudeCodeHarness"
+codex = "fledge.builtin.harnesses.codex:CodexHarness"
 ```
 
 Steps have no registry. A step is only ever reached through the workflow that
