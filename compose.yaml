@@ -3,6 +3,7 @@
 #
 #   cp fledge.example.toml fledge.toml   # then edit the trigger
 #   printf 'GITHUB_TOKEN=...\nANTHROPIC_API_KEY=...\n' > .env
+#   (or CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token` to use a subscription)
 #   docker compose up --build
 services:
   postgres:

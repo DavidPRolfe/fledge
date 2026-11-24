@@ -25,8 +25,8 @@ classes registered through entry points. See section 3 of the architecture doc.
 ## Running it locally
 
 You need Docker with Compose, a GitHub token that can read issues, push
-branches and open pull requests on the target repository, and an Anthropic API
-key for Claude Code.
+branches and open pull requests on the target repository, and credentials for
+Claude Code: either an Anthropic API key or a Claude subscription token.
 
 1. Create the config and point the trigger at your repository and label:
 
@@ -41,6 +41,18 @@ key for Claude Code.
    GITHUB_TOKEN=...
    ANTHROPIC_API_KEY=...
    ```
+
+   To bill a Claude Pro or Max subscription instead of the API, run
+   `claude setup-token` on your machine and use the token it prints:
+
+   ```
+   GITHUB_TOKEN=...
+   CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat...
+   ```
+
+   Then replace `ANTHROPIC_API_KEY` with `CLAUDE_CODE_OAUTH_TOKEN` in
+   `step_secrets`. Don't pass both: Claude Code prefers the API key when it is
+   set. Runs share your subscription's usage limits with your own Claude use.
 
 3. Start Postgres and the factory:
 

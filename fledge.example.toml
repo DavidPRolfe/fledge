@@ -9,7 +9,8 @@ max_concurrent_runs = 1
 poll_interval_seconds = 30
 step_timeout_minutes = 60
 # Names of environment variables copied from the control plane into every
-# step container.
+# step container. To use a Claude subscription instead of an API key, replace
+# ANTHROPIC_API_KEY with CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`).
 step_secrets = ["GITHUB_TOKEN", "ANTHROPIC_API_KEY"]
 
 [[trigger]]
