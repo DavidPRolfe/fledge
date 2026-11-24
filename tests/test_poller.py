@@ -1,0 +1,123 @@
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from datetime import datetime
+
+import pytest
+
+from fledge.config import Config
+from fledge.core import Comment, WorkItem
+from fledge.poller import Poller, TriggerBinding
+from fledge.store import Store
+
+pytestmark = pytest.mark.anyio
+
+
+def work_item(external_id: str) -> WorkItem:
+    return WorkItem(
+        external_id=external_id,
+        title=f"Issue {external_id}",
+        body="",
+        url=f"https://example.test/{external_id}",
+        repo_url="https://example.test/repo.git",
+    )
+
+
+@dataclass
+class FakeTrigger:
+    items: list[WorkItem] = field(default_factory=list)
+    comments: dict[str, list[Comment]] = field(default_factory=dict)
+    guidance_calls: list[tuple[str, datetime]] = field(default_factory=list)
+
+    async def poll(self) -> list[WorkItem]:
+        return self.items
+
+    async def fetch(self, ref: str) -> WorkItem:
+        return work_item(ref)
+
+    async def poll_guidance(
+        self, item_external_id: str, since: datetime
+    ) -> list[Comment]:
+        self.guidance_calls.append((item_external_id, since))
+        return self.comments.get(item_external_id, [])
+
+
+class BrokenTrigger(FakeTrigger):
+    async def poll(self) -> list[WorkItem]:
+        raise ConnectionError("ticket system is down")
+
+
+CONFIG = Config(image="fledge:test", api_url="http://fledge:8000", docker_network="n")
+
+
+@pytest.fixture
+async def store(database_url: str) -> AsyncIterator[Store]:
+    async with Store(database_url) as store:
+        yield store
+
+
+async def test_items_become_runs_once(store: Store) -> None:
+    trigger = FakeTrigger(items=[work_item("1"), work_item("2")])
+    poller = Poller(store, {"issues": TriggerBinding(trigger, "ticket_to_pr")}, CONFIG)
+
+    await poller.poll_once()
+    await poller.poll_once()
+
+    runs = await store.list_runs()
+    assert sorted(run.external_id for run in runs) == ["1", "2"]
+    assert {(run.trigger, run.workflow, run.origin) for run in runs} == {
+        ("issues", "ticket_to_pr", "poll")
+    }
+
+
+async def test_comments_on_active_runs_become_guidance_once(store: Store) -> None:
+    trigger = FakeTrigger(items=[work_item("1")])
+    poller = Poller(store, {"issues": TriggerBinding(trigger, "ticket_to_pr")}, CONFIG)
+    await poller.poll_once()
+    [run] = await store.list_runs()
+
+    trigger.comments["1"] = [
+        Comment(external_id="c1", author="ann", body="use the v2 API"),
+        Comment(external_id="c2", author="bob", body="and add a test"),
+    ]
+    await poller.poll_once()
+    await poller.poll_once()
+
+    guidance = await store.list_guidance(run.id)
+    assert [(g.source, g.external_id, g.author, g.body) for g in guidance] == [
+        ("trigger", "c1", "ann", "use the v2 API"),
+        ("trigger", "c2", "bob", "and add a test"),
+    ]
+    assert trigger.guidance_calls[-1] == ("1", run.created_at)
+
+
+async def test_finished_runs_are_not_polled_for_guidance(store: Store) -> None:
+    trigger = FakeTrigger(items=[work_item("1")])
+    poller = Poller(store, {"issues": TriggerBinding(trigger, "ticket_to_pr")}, CONFIG)
+    await poller.poll_once()
+    await poller.poll_once()
+    [run] = await store.list_runs()
+    assert await store.finish_run(run.id, "succeeded")
+
+    await poller.poll_once()
+
+    assert trigger.guidance_calls == [("1", run.created_at)]
+
+
+async def test_one_failing_trigger_does_not_block_another(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    healthy = FakeTrigger(items=[work_item("1")])
+    poller = Poller(
+        store,
+        {
+            "broken": TriggerBinding(BrokenTrigger(), "ticket_to_pr"),
+            "healthy": TriggerBinding(healthy, "ticket_to_pr"),
+        },
+        CONFIG,
+    )
+
+    await poller.poll_once()
+
+    [run] = await store.list_runs()
+    assert run.trigger == "healthy"
+    assert "polling trigger 'broken' failed" in caplog.text

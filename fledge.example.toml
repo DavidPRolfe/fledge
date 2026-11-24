@@ -1,0 +1,20 @@
+# Image used for every step container. With compose.yaml this is the image
+# compose builds.
+image = "fledge:dev"
+# Where step containers reach the control plane.
+api_url = "http://fledge:8000"
+docker_network = "fledge"
+
+max_concurrent_runs = 1
+poll_interval_seconds = 30
+step_timeout_minutes = 60
+# Names of environment variables copied from the control plane into every
+# step container.
+step_secrets = ["GITHUB_TOKEN", "ANTHROPIC_API_KEY"]
+
+[[trigger]]
+name = "issues"
+type = "github_issues"
+workflow = "ticket_to_pr"
+repo = "owner/name"
+label = "fledge"

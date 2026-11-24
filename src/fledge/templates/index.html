@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Runs</h1>
+
+<h2>Launch</h2>
+<form id="launch">
+  <select name="trigger" required>
+    {% for name in triggers %}<option value="{{ name }}">{{ name }}</option>{% endfor %}
+  </select>
+  <input name="ref" placeholder="ticket ref" required>
+  <button type="submit">Launch</button>
+</form>
+<p id="launch-error" class="error"></p>
+
+<table>
+  <thead><tr><th>Title</th><th>Trigger</th><th>Status</th><th>Created</th></tr></thead>
+  <tbody>
+  {% for run in runs %}
+    <tr>
+      <td><a href="/runs/{{ run.id }}">{{ run.title }}</a></td>
+      <td>{{ run.trigger }}</td>
+      <td class="status">{{ run.status }}</td>
+      <td>{{ run.created_at | time }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">No runs yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<script>
+  const form = document.getElementById("launch");
+  const errorBox = document.getElementById("launch-error");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    errorBox.textContent = "";
+    const data = new FormData(form);
+    const response = await fetch("/api/runs", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({trigger: data.get("trigger"), ref: data.get("ref")}),
+    });
+    const body = await response.json().catch(() => ({detail: response.status + " " + response.statusText}));
+    if (response.status === 201) {
+      window.location.href = "/runs/" + encodeURIComponent(body.id);
+    } else {
+      errorBox.textContent = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+    }
+  });
+</script>
+{% endblock %}

@@ -313,11 +313,13 @@ class Step(Protocol):
 
 
 class StepContext(Protocol):
+    run_id: UUID
     work: WorkItem
     workspace: Path                       # shared by all steps of the run
     outputs: Mapping[str, Mapping[str, str]]   # earlier outputs, by step name
 
     def log(self, message: str) -> None: ...
+    def agent_event(self, message: str) -> None: ...
     def claim_guidance(self) -> list[str]: ...
     def harness(self, name: str) -> Harness: ...
 ```
@@ -380,6 +382,8 @@ One image runs everywhere. `fledge serve` is the control plane and
 
 ```toml
 image = "ghcr.io/acme/fledge-acme:1"
+api_url = "http://fledge:8000"   # where step containers reach the control plane
+docker_network = "fledge"        # network step containers join
 max_concurrent_runs = 1
 poll_interval_seconds = 30
 step_timeout_minutes = 60

@@ -1,0 +1,46 @@
+# Local factory: Postgres plus the control plane. Step containers are started
+# by the control plane through the Docker socket and join the same network.
+#
+#   cp fledge.example.toml fledge.toml   # then edit the trigger
+#   printf 'GITHUB_TOKEN=...\nANTHROPIC_API_KEY=...\n' > .env
+#   docker compose up --build
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: fledge
+      POSTGRES_PASSWORD: fledge
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fledge"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  fledge:
+    build: .
+    image: fledge:dev
+    # Root only so it can use the Docker socket; step containers run as the
+    # image's unprivileged user.
+    user: root
+    command: ["fledge", "serve", "--config", "/etc/fledge/fledge.toml"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://postgres:fledge@postgres/fledge
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./fledge.toml:/etc/fledge/fledge.toml:ro
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+
+networks:
+  default:
+    # Fixed name so docker_network in fledge.toml can refer to it.
+    name: fledge
