@@ -117,6 +117,42 @@ The tests need two things from your machine:
 
 Coding rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 
+### Running the factory from your checkout
+
+To iterate without rebuilding the image, run the control plane on your machine
+and let step containers use your checkout's code. Steps still run in
+containers, so agents stay sandboxed.
+
+1. Build the image once, so step containers have the CLIs and dependencies.
+   Rebuild only when `pyproject.toml`, `uv.lock` or the `Dockerfile` change.
+
+   ```bash
+   docker build -t fledge:dev .
+   ```
+
+2. In `fledge.toml`, point step containers back at your machine and mount
+   your source over the image's:
+
+   ```toml
+   api_url = "http://host.docker.internal:8000"   # host.containers.internal on Podman
+   docker_network = "bridge"                      # "podman" on Podman
+   step_source_dir = "/absolute/path/to/checkout/src"
+   ```
+
+3. Start the control plane against a local Postgres database:
+
+   ```bash
+   createdb fledge
+   DATABASE_URL=postgresql:///fledge uv run --env-file .env fledge serve --host 127.0.0.1
+   ```
+
+   Set `DOCKER_HOST` if your daemon's socket is not the default (on Podman,
+   `unix://$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}')`).
+
+After a code change, restart `fledge serve`. The next step container picks up
+the change by itself. Changes to entry points in `pyproject.toml` still need a
+rebuild, because the image's installed metadata lists them.
+
 ### Layout
 
 | Path | What it holds |

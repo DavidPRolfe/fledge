@@ -6,6 +6,7 @@ import uuid
 import warnings
 from collections.abc import Iterator
 from contextlib import suppress
+from pathlib import Path
 
 import anyio
 import docker
@@ -13,7 +14,12 @@ import pytest
 from docker.errors import DockerException, NotFound
 
 from fledge.runner.base import ContainerState, StepSpec
-from fledge.runner.docker import DockerRunner, container_name, volume_name
+from fledge.runner.docker import (
+    IMAGE_SOURCE_PATH,
+    DockerRunner,
+    container_name,
+    volume_name,
+)
 from fledge.wire import WORKSPACE_PATH
 
 IMAGE = "docker.io/library/alpine:3.20"
@@ -216,3 +222,23 @@ async def test_delete_workspace_removes_the_volume_and_is_idempotent(
 
     with pytest.raises(NotFound):
         client.volumes.get(volume_name(run_id))
+
+
+@pytest.mark.anyio
+async def test_source_dir_is_mounted_read_only_over_the_image_source(
+    network: str, client: docker.DockerClient, ids: Tracker, tmp_path: Path
+) -> None:
+    (tmp_path / "marker").write_text("local")
+    runner = DockerRunner(network, command=SCRIPT_COMMAND, source_dir=tmp_path)
+    run_id = ids.run_id()
+    await runner.create_workspace(run_id)
+    step_run_id = ids.step_run_id()
+    script = (
+        f'test "$(cat {IMAGE_SOURCE_PATH}/marker)" = local'
+        f" && ! touch {IMAGE_SOURCE_PATH}/other"
+    )
+
+    await runner.start_step(spec(run_id, step_run_id, script))
+    await wait_for_state(runner, step_run_id, ContainerState.EXITED)
+
+    assert exit_code(client, step_run_id) == 0

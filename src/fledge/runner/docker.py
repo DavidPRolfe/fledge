@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Sequence
+from pathlib import Path
 from uuid import UUID
 
 import docker
@@ -12,6 +13,9 @@ from fledge.wire import WORKSPACE_PATH
 # created container is a step still on its way up, not one that has finished.
 _RUNNING_STATUSES = frozenset({"created", "running", "restarting", "paused"})
 _EXITED_STATUSES = frozenset({"exited", "dead"})
+# Where the Dockerfile copies src/. The image installs fledge in editable mode,
+# so code mounted here replaces the code the image was built with.
+IMAGE_SOURCE_PATH = "/app/src"
 
 
 def volume_name(run_id: UUID) -> str:
@@ -25,22 +29,34 @@ def container_name(step_run_id: UUID) -> str:
 class DockerRunner:
     """Runner backed by the Docker daemon at DOCKER_HOST (or the default socket)."""
 
-    def __init__(self, network: str, command: Sequence[str] = STEP_COMMAND) -> None:
+    def __init__(
+        self,
+        network: str,
+        command: Sequence[str] = STEP_COMMAND,
+        source_dir: Path | None = None,
+    ) -> None:
         self._client = docker.from_env()
         self._network = network
         self._command = list(command)
+        self._source_dir = source_dir
 
     async def create_workspace(self, run_id: UUID) -> None:
         await asyncio.to_thread(self._client.volumes.create, name=volume_name(run_id))
 
     async def start_step(self, spec: StepSpec) -> None:
+        volumes = {volume_name(spec.run_id): {"bind": WORKSPACE_PATH, "mode": "rw"}}
+        if self._source_dir is not None:
+            volumes[str(self._source_dir.resolve())] = {
+                "bind": IMAGE_SOURCE_PATH,
+                "mode": "ro",
+            }
         await asyncio.to_thread(
             self._client.containers.run,
             spec.image,
             self._command,
             name=container_name(spec.step_run_id),
             environment=dict(spec.env),
-            volumes={volume_name(spec.run_id): {"bind": WORKSPACE_PATH, "mode": "rw"}},
+            volumes=volumes,
             working_dir=WORKSPACE_PATH,
             network=self._network,
             detach=True,

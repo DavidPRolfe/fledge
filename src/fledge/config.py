@@ -35,6 +35,9 @@ class Config(BaseModel):
     poll_interval_seconds: int = 30
     step_timeout_minutes: int = 60
     step_secrets: list[str] = []
+    step_source_dir: Path | None = None
+    """Host directory bind-mounted over the image's src/ in step containers, so
+    a local checkout's step code runs without rebuilding the image."""
     trigger: list[TriggerConfig] = []
 
 

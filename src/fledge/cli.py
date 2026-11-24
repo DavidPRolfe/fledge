@@ -30,7 +30,10 @@ async def _serve(config: Config, database_url: str, host: str, port: int) -> Non
             store, {name: b.trigger for name, b in bindings.items()}, config
         )
         orchestrator = Orchestrator(
-            store, DockerRunner(config.docker_network), config, load_workflow
+            store,
+            DockerRunner(config.docker_network, source_dir=config.step_source_dir),
+            config,
+            load_workflow,
         )
         poller = Poller(store, bindings, config)
         server = uvicorn.Server(
