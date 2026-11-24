@@ -1,0 +1,39 @@
+# Install once: uv run pre-commit install --hook-type pre-commit --hook-type pre-push
+# Local hooks run the versions pinned in uv.lock, so there's no rev to keep in sync.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types_or: [python, pyi]
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types_or: [python, pyi]
+
+      - id: mypy
+        name: mypy
+        entry: uv run mypy .
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+
+      - id: no-emoji
+        name: no emoji or check-mark symbols in code
+        language: pygrep
+        # UTF-8 bytes for U+1F000-1FFFF (emoji), U+2600-27BF (✓ ✗ ✅ ❌ etc.),
+        # U+2B50/2B55 (⭐ ⭕) and U+FE0F (emoji variation selector).
+        entry: '\xF0\x9F|\xE2[\x98-\x9E]|\xE2\xAD[\x90\x95]|\xEF\xB8\x8F'
+        types_or: [python, pyi]
+
+      - id: pytest
+        name: pytest
+        entry: uv run pytest -x -q
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
