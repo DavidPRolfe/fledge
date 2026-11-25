@@ -31,6 +31,10 @@ services:
       DATABASE_URL: postgresql://postgres:fledge@postgres/fledge
     ports:
       - "127.0.0.1:8000:8000"
+    # SELinux (on by default in the Podman machine) otherwise blocks the
+    # container from using the socket.
+    security_opt:
+      - label=disable
     volumes:
       - ./fledge.toml:/etc/fledge/fledge.toml:ro
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock

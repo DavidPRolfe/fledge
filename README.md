@@ -65,7 +65,12 @@ Claude Code: either an Anthropic API key or a Claude subscription token.
 The control plane starts step containers through the Docker socket. If your
 socket is not at `/var/run/docker.sock`, set `DOCKER_SOCKET` to its path before
 running Compose. On Podman, the socket path is the one inside the Podman
-machine, and the `fledge` service also needs `security_opt: [label=disable]`.
+machine; a rootful machine already has `/var/run/docker.sock`.
+
+If you run Compose before creating `fledge.toml`, Docker or Podman creates
+`fledge.toml` as an empty directory and the factory exits with
+`IsADirectoryError`. Remove it with `rmdir fledge.toml` before copying the
+example, or `cp` puts the file inside it.
 
 ## Using it
 
