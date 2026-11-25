@@ -24,6 +24,17 @@ def _no_inherited_git_repository(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_credentials_or_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Tests that need a secret set a fake one; a real token from the
+    # developer's shell must never reach a test, and their FLEDGE_* settings
+    # must not change what Settings() returns.
+    for name in ["GITHUB_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]:
+        monkeypatch.delenv(name, raising=False)
+    for name in [name for name in os.environ if name.startswith("FLEDGE_")]:
+        monkeypatch.delenv(name)
+
+
 @pytest.fixture
 def database_url() -> Iterator[str]:
     """A migrated throwaway database on the server at FLEDGE_TEST_DATABASE_URL."""

@@ -108,7 +108,7 @@ flowchart TB
    the same trigger and external id. A manual launch (web box or
    `fledge submit`) calls the trigger's `fetch()` and always inserts a run.
 2. **Start.** The orchestrator promotes `pending` runs to `running` while fewer
-   than `max_concurrent_runs` are running, oldest first, and asks the runner to
+   than `FLEDGE_MAX_CONCURRENT_RUNS` are running, oldest first, and asks the runner to
    create the run's workspace.
 3. **Step.** For the run's next step, the orchestrator inserts a `step_runs` row
    with a fresh token and asks the runner to start a container. The container
@@ -261,17 +261,13 @@ class Trigger(Protocol):
 (`trigger`, `external_id`), so a trigger keeps no cursor. `since` is the run's
 start time, and comments are deduplicated on their external id.
 
-A trigger instance is declared in `fledge.toml`. `name` identifies the instance,
-`type` is the entry point name, `workflow` names the workflow its runs use, and
-the remaining keys are passed to the trigger's constructor as keyword arguments:
+A trigger instance is declared in the `FLEDGE_TRIGGERS` JSON list. `name`
+identifies the instance, `type` is the entry point name, `workflow` names the
+workflow its runs use, and the remaining keys are passed to the trigger's
+constructor as keyword arguments:
 
-```toml
-[[trigger]]
-name = "api-issues"
-type = "github_issues"
-workflow = "ticket_to_pr"
-repo = "acme/api"
-label = "fledge"
+```
+FLEDGE_TRIGGERS='[{"name": "api-issues", "type": "github_issues", "workflow": "ticket_to_pr", "repo": "acme/api", "label": "fledge"}]'
 ```
 
 ### Workflow
@@ -372,22 +368,25 @@ A harness needs its CLI present in the image. The base image ships both.
    entry points.
 2. Build an image `FROM` the Fledge base image that installs the package and
    any toolchains the target repositories need.
-3. Point `fledge.toml` at the trigger type and workflow name.
+3. Point `FLEDGE_TRIGGERS` at the trigger type and workflow name.
 
 ## 4. Deployment
 
 One image runs everywhere. `fledge serve` is the control plane and
-`fledge step-exec` is the step container's command. Configuration is one file,
-`fledge.toml`, plus `DATABASE_URL` and secrets in the environment:
+`fledge step-exec` is the step container's command. Configuration is
+environment variables only: `DATABASE_URL`, the step secrets, and the
+`FLEDGE_*` settings in `fledge.settings.Settings`. The defaults suit the
+bundled `compose.yaml`:
 
-```toml
-image = "ghcr.io/acme/fledge-acme:1"
-api_url = "http://fledge:8000"   # where step containers reach the control plane
-docker_network = "fledge"        # network step containers join
-max_concurrent_runs = 1
-poll_interval_seconds = 30
-step_timeout_minutes = 60
-step_secrets = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"]
+```
+FLEDGE_IMAGE=fledge:dev
+FLEDGE_API_URL=http://fledge:8000      # where step containers reach the control plane
+FLEDGE_DOCKER_NETWORK=fledge           # network step containers join
+FLEDGE_MAX_CONCURRENT_RUNS=1
+FLEDGE_POLL_INTERVAL_SECONDS=30
+FLEDGE_STEP_TIMEOUT_MINUTES=60
+FLEDGE_STEP_SECRETS=GITHUB_TOKEN,ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN  # passed to steps when set
+FLEDGE_TRIGGERS=[]
 ```
 
 Schema migrations are numbered SQL files applied by `fledge migrate`, which
@@ -396,7 +395,7 @@ Schema migrations are numbered SQL files applied by `fledge migrate`, which
 ### Local Docker
 
 A `compose.yaml` with two services: `postgres` and `fledge`. The `fledge`
-service mounts the Docker socket and `fledge.toml`, and reads secrets from
+service mounts the Docker socket and reads secrets and settings from
 `.env`. The Docker runner creates one named volume per run and one container
 per step, attached to the compose network so steps can reach the control plane
 by service name.
@@ -408,7 +407,7 @@ The local flow:
 2. Either label issues so the trigger picks them up, or name them:
    `fledge submit --trigger api-issues 12 14 15`. `submit` is a thin client for
    `POST /api/runs`.
-3. Runs queue as `pending` and are worked through `max_concurrent_runs` at a
+3. Runs queue as `pending` and are worked through `FLEDGE_MAX_CONCURRENT_RUNS` at a
    time. The web view shows each run's steps and live events.
 
 No Kubernetes is involved at any point.
@@ -416,13 +415,13 @@ No Kubernetes is involved at any point.
 ### Kubernetes (designed, deferred)
 
 Not part of the first implementation. This section is the target the Docker
-build must not rule out. The Kubernetes task also adds a `runner` key to
-`fledge.toml` to choose the platform.
+build must not rule out. The Kubernetes task also adds a `FLEDGE_RUNNER`
+setting to choose the platform.
 
 Plain manifests, applied with `kubectl apply -k`:
 
 - A `Deployment` with one replica running `fledge serve`, and a `Service`.
-- A `ConfigMap` holding `fledge.toml`.
+- A `ConfigMap` holding the `FLEDGE_*` settings.
 - A `Secret` holding `DATABASE_URL` and the step secrets.
 - A `ServiceAccount` with a namespaced `Role` allowing it to manage `Jobs` and
   `PersistentVolumeClaims` and read `Pods`.
@@ -518,7 +517,7 @@ Out of scope by instruction, with where each touches this design:
   the workflow list or a process that starts from the pull request; neither
   needs a change to the interfaces above.
 - **Credential isolation and safe publishing.** `OpenPullRequest` is the only
-  step that writes to source control, and `step_secrets` is the only place
+  step that writes to source control, and `FLEDGE_STEP_SECRETS` is the only place
   secrets are handed out. Scoping secrets per step, or moving the push out of
   agent-reachable containers, changes those two places.
 - **Tying approvals to commits.** `OpenPullRequest` already returns `head_sha`

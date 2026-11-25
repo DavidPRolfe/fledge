@@ -5,8 +5,8 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from fledge.config import Config, TriggerConfig
 from fledge.core import Comment, WorkItem
+from fledge.settings import Settings, TriggerConfig
 from fledge.store import Run, StepRun, Store, hash_token
 from fledge.web.app import create_app
 
@@ -51,11 +51,11 @@ async def store(database_url: str) -> AsyncIterator[Store]:
 
 @pytest.fixture
 async def client(store: Store) -> AsyncIterator[httpx.AsyncClient]:
-    config = Config(
+    config = Settings(
         image="fledge:test",
         api_url="http://fledge:8000",
         docker_network="fledge",
-        trigger=[TriggerConfig(name="issues", type="fake", workflow="ticket_to_pr")],
+        triggers=[TriggerConfig(name="issues", type="fake", workflow="ticket_to_pr")],
     )
     trigger = FakeTrigger({"7": work_item("7"), "8": work_item("8", UNTRUSTED_TITLE)})
     app = create_app(store, {"issues": trigger}, config)

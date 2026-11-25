@@ -7,9 +7,9 @@ import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
-from fledge.config import Config
 from fledge.core import Workflow
 from fledge.runner.base import ContainerState, Runner, StepSpec
+from fledge.settings import Settings
 from fledge.store import Run, StepRun, Store, TerminalRunStatus, hash_token
 from fledge.wire import API_URL_ENV, STEP_RUN_ID_ENV, STEP_TOKEN_ENV
 
@@ -23,16 +23,20 @@ class Orchestrator:
         self,
         store: Store,
         runner: Runner,
-        config: Config,
+        config: Settings,
         load_workflow: Callable[[str], Workflow],
     ) -> None:
+        # Alternatives such as ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN
+        # share the default list, so an unset one is expected; a step that
+        # needs it fails in its container with its own error.
         missing = [name for name in config.step_secrets if name not in os.environ]
         if missing:
-            raise RuntimeError(
-                "step_secrets not set in the control plane's environment: "
-                + ", ".join(missing)
+            logger.warning(
+                "step secrets not set, so not passed to steps: %s", ", ".join(missing)
             )
-        self._secrets = {name: os.environ[name] for name in config.step_secrets}
+        self._secrets = {
+            name: os.environ[name] for name in config.step_secrets if name in os.environ
+        }
         self._store = store
         self._runner = runner
         self._config = config

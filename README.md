@@ -28,65 +28,57 @@ You need Docker with Compose, a GitHub token that can read issues, push
 branches and open pull requests on the target repository, and credentials for
 Claude Code: either an Anthropic API key or a Claude subscription token.
 
-1. Create the config and point the trigger at your repository and label:
-
-   ```bash
-   cp fledge.example.toml fledge.toml
-   ```
-
-2. Put the secrets in `.env`. These are the names listed under `step_secrets`
-   in `fledge.toml`; they are passed to every step container.
+1. Create `.env` with the secrets and a trigger pointing at your repository
+   and label. Of the names listed in `FLEDGE_STEP_SECRETS` (default
+   `GITHUB_TOKEN,ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN`), the ones that are
+   set are passed to every step container.
 
    ```
    GITHUB_TOKEN=...
    ANTHROPIC_API_KEY=...
+   FLEDGE_TRIGGERS='[{"name": "issues", "type": "github_issues", "workflow": "ticket_to_pr", "repo": "owner/name", "label": "fledge"}]'
    ```
 
    To bill a Claude Pro or Max subscription instead of the API, run
-   `claude setup-token` on your machine and use the token it prints:
+   `claude setup-token` on your machine and use the token it prints in place
+   of `ANTHROPIC_API_KEY`:
 
    ```
    GITHUB_TOKEN=...
    CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat...
    ```
 
-   Then replace `ANTHROPIC_API_KEY` with `CLAUDE_CODE_OAUTH_TOKEN` in
-   `step_secrets`. Don't pass both: Claude Code prefers the API key when it is
-   set. Runs share your subscription's usage limits with your own Claude use.
+   Don't set both: Claude Code prefers the API key when it is set. Runs share
+   your subscription's usage limits with your own Claude use.
 
-3. Start Postgres and the factory:
+2. Start Postgres and the factory:
 
    ```bash
    docker compose up --build
    ```
 
-4. Open http://localhost:8000.
+3. Open http://localhost:8000.
 
 The control plane starts step containers through the Docker socket. If your
 socket is not at `/var/run/docker.sock`, set `DOCKER_SOCKET` to its path before
 running Compose. On Podman, the socket path is the one inside the Podman
 machine; a rootful machine already has `/var/run/docker.sock`.
 
-If you run Compose before creating `fledge.toml`, Docker or Podman creates
-`fledge.toml` as an empty directory and the factory exits with
-`IsADirectoryError`. Remove it with `rmdir fledge.toml` before copying the
-example, or `cp` puts the file inside it.
-
 ## Using it
 
 **Choose the tickets.** Either add the configured label to issues, and the
-trigger picks them up within `poll_interval_seconds`, or name them yourself:
+trigger picks them up within `FLEDGE_POLL_INTERVAL_SECONDS`, or name them yourself:
 
 ```bash
 uv run fledge submit --trigger issues 12 14 15
 ```
 
-`--trigger` is the trigger's `name` in `fledge.toml`, and each argument is an
+`--trigger` is the trigger's `name` in `FLEDGE_TRIGGERS`, and each argument is an
 issue number. The launch box on the web view's front page does the same thing.
 A ticket found by polling is only ever run once; launching by hand always
 starts a new run.
 
-**Watch.** Runs are worked through `max_concurrent_runs` at a time. The run
+**Watch.** Runs are worked through `FLEDGE_MAX_CONCURRENT_RUNS` at a time. The run
 page shows each step's status, its outputs (including the pull request link)
 and a live event log.
 
@@ -135,13 +127,13 @@ containers, so agents stay sandboxed.
    docker build -t fledge:dev .
    ```
 
-2. In `fledge.toml`, point step containers back at your machine and mount
-   your source over the image's:
+2. In `.env`, point step containers back at your machine and mount your
+   source over the image's:
 
-   ```toml
-   api_url = "http://host.docker.internal:8000"   # host.containers.internal on Podman
-   docker_network = "bridge"                      # "podman" on Podman
-   step_source_dir = "/absolute/path/to/checkout/src"
+   ```
+   FLEDGE_API_URL=http://host.docker.internal:8000   # host.containers.internal on Podman
+   FLEDGE_DOCKER_NETWORK=bridge                      # podman on Podman
+   FLEDGE_STEP_SOURCE_DIR=/absolute/path/to/checkout/src
    ```
 
 3. Start the control plane against a local Postgres database:
@@ -176,5 +168,5 @@ rebuild, because the image's installed metadata lists them.
 Write a package that implements the interfaces in `fledge.core` and registers
 them under the `fledge.triggers`, `fledge.workflows` or `fledge.harnesses`
 entry point groups, then build an image `FROM` the fledge image that installs
-it. Set `image` in `fledge.toml` to that image and refer to your trigger type
+it. Set `FLEDGE_IMAGE` to that image and refer to your trigger type
 and workflow by their entry point names.

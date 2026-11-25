@@ -3,18 +3,17 @@ import asyncio
 import logging
 import os
 import sys
-from pathlib import Path
 
 import httpx
 import uvicorn
 
-from fledge.config import Config, load_config
 from fledge.db import migrate
 from fledge.executor import execute_from_env
 from fledge.orchestrator import Orchestrator
 from fledge.poller import Poller, load_triggers
 from fledge.registry import load_workflow
 from fledge.runner.docker import DockerRunner
+from fledge.settings import Settings
 from fledge.store import Store
 from fledge.web.app import create_app
 
@@ -23,7 +22,7 @@ logger = logging.getLogger(__name__)
 DATABASE_URL_ENV = "DATABASE_URL"
 
 
-async def _serve(config: Config, database_url: str, host: str, port: int) -> None:
+async def _serve(config: Settings, database_url: str, host: str, port: int) -> None:
     bindings = load_triggers(config)
     async with Store(database_url) as store:
         app = create_app(
@@ -68,7 +67,6 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     serve = commands.add_parser("serve", help="run the control plane")
-    serve.add_argument("--config", type=Path, default=Path("fledge.toml"))
     serve.add_argument("--host", default="0.0.0.0")  # noqa: S104 - runs in a container; compose publishes it on localhost only
     serve.add_argument("--port", type=int, default=8000)
 
@@ -76,7 +74,9 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("step-exec", help="run one step (inside a step container)")
 
     submit = commands.add_parser("submit", help="launch runs for tickets by hand")
-    submit.add_argument("--trigger", required=True, help="trigger name in fledge.toml")
+    submit.add_argument(
+        "--trigger", required=True, help="trigger name from FLEDGE_TRIGGERS"
+    )
     submit.add_argument("--url", default="http://localhost:8000")
     submit.add_argument("refs", nargs="+", metavar="ref")
     return parser
@@ -91,9 +91,7 @@ def main() -> None:
         case "serve":
             database_url = os.environ[DATABASE_URL_ENV]
             migrate(database_url)
-            asyncio.run(
-                _serve(load_config(args.config), database_url, args.host, args.port)
-            )
+            asyncio.run(_serve(Settings(), database_url, args.host, args.port))
         case "migrate":
             migrate(os.environ[DATABASE_URL_ENV])
         case "step-exec":

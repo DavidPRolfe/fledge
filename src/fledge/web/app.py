@@ -2,8 +2,8 @@ from collections.abc import Mapping
 
 from fastapi import FastAPI
 
-from fledge.config import Config
 from fledge.core import Trigger
+from fledge.settings import Settings
 from fledge.store import Store
 from fledge.web.internal_api import internal_routes
 from fledge.web.pages import page_routes
@@ -11,9 +11,9 @@ from fledge.web.public_api import public_routes
 
 
 def create_app(
-    store: Store, triggers: Mapping[str, Trigger], config: Config
+    store: Store, triggers: Mapping[str, Trigger], config: Settings
 ) -> FastAPI:
-    workflows = {trigger.name: trigger.workflow for trigger in config.trigger}
+    workflows = {trigger.name: trigger.workflow for trigger in config.triggers}
     if set(workflows) != set(triggers):
         raise ValueError(
             f"triggers {sorted(triggers)} do not match the configured "

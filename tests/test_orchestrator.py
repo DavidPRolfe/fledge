@@ -4,10 +4,10 @@ from uuid import UUID
 
 import pytest
 
-from fledge.config import Config
 from fledge.core import StepContext, Workflow, WorkItem
 from fledge.orchestrator import Orchestrator
 from fledge.runner.base import ContainerState, StepSpec
+from fledge.settings import Settings
 from fledge.store import Run, StepRun, Store, hash_token
 from fledge.wire import API_URL_ENV, STEP_RUN_ID_ENV, STEP_TOKEN_ENV
 
@@ -58,8 +58,8 @@ class FakeRunner:
         self.deleted_workspaces.add(run_id)
 
 
-def make_config(**overrides: object) -> Config:
-    return Config.model_validate(
+def make_config(**overrides: object) -> Settings:
+    return Settings.model_validate(
         {
             "image": "fledge:test",
             "api_url": "http://fledge:8000",
@@ -336,12 +336,24 @@ async def test_step_env_carries_wire_settings_and_secrets(
     assert spec.env["GH_TOKEN"] == configured
 
 
-async def test_missing_secret_fails_at_construction(
-    store: Store, runner: FakeRunner, monkeypatch: pytest.MonkeyPatch
+async def test_unset_secret_is_not_passed_and_is_logged(
+    store: Store,
+    runner: FakeRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    configured = "gh-value"
+    monkeypatch.setenv("GH_TOKEN", configured)
     monkeypatch.delenv("FLEDGE_TEST_ABSENT", raising=False)
-    with pytest.raises(RuntimeError, match="FLEDGE_TEST_ABSENT"):
-        orchestrator(store, runner, step_secrets=["FLEDGE_TEST_ABSENT"])
+    orch = orchestrator(store, runner, step_secrets=["GH_TOKEN", "FLEDGE_TEST_ABSENT"])
+    await make_run(store, "two_steps")
+
+    await orch.tick()
+
+    [spec] = runner.started
+    assert spec.env["GH_TOKEN"] == configured
+    assert "FLEDGE_TEST_ABSENT" not in spec.env
+    assert "FLEDGE_TEST_ABSENT" in caplog.text
 
 
 async def test_one_broken_run_does_not_block_others(

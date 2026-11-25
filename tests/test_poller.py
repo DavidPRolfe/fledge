@@ -4,9 +4,9 @@ from datetime import datetime
 
 import pytest
 
-from fledge.config import Config
 from fledge.core import Comment, WorkItem
 from fledge.poller import Poller, TriggerBinding
+from fledge.settings import Settings
 from fledge.store import Store
 
 pytestmark = pytest.mark.anyio
@@ -46,7 +46,7 @@ class BrokenTrigger(FakeTrigger):
         raise ConnectionError("ticket system is down")
 
 
-CONFIG = Config(image="fledge:test", api_url="http://fledge:8000", docker_network="n")
+CONFIG = Settings(image="fledge:test", api_url="http://fledge:8000", docker_network="n")
 
 
 @pytest.fixture

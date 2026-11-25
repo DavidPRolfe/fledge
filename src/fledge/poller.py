@@ -5,9 +5,9 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from fledge.config import Config
 from fledge.core import Trigger
 from fledge.registry import load_trigger
+from fledge.settings import Settings
 from fledge.store import Run, Store
 
 logger = logging.getLogger(__name__)
@@ -19,17 +19,17 @@ class TriggerBinding:
     workflow: str
 
 
-def load_triggers(config: Config) -> dict[str, TriggerBinding]:
+def load_triggers(config: Settings) -> dict[str, TriggerBinding]:
     """Instantiate each configured trigger, keyed by its instance name."""
     return {
         entry.name: TriggerBinding(load_trigger(entry), entry.workflow)
-        for entry in config.trigger
+        for entry in config.triggers
     }
 
 
 class Poller:
     def __init__(
-        self, store: Store, triggers: Mapping[str, TriggerBinding], config: Config
+        self, store: Store, triggers: Mapping[str, TriggerBinding], config: Settings
     ) -> None:
         self._store = store
         self._triggers = triggers

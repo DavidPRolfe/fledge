@@ -14,4 +14,3 @@ wheels/
 .coverage
 .env
 .idea/
-fledge.toml

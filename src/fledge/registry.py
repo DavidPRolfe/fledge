@@ -2,8 +2,8 @@
 
 from importlib.metadata import entry_points
 
-from fledge.config import TriggerConfig
 from fledge.core import Harness, Trigger, Workflow
+from fledge.settings import TriggerConfig
 
 
 def _load(group: str, name: str) -> object:
