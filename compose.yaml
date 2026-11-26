@@ -3,6 +3,7 @@
 #
 #   Write workflows in ./workflows and put the secrets in .env (see README.md)
 #   docker compose up --build
+#   With Podman the equivalent is: podman compose up --build
 services:
   postgres:
     image: postgres:17
