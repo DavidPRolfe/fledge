@@ -1,7 +1,7 @@
-"""Postgres persistence for runs, step runs, events and guidance."""
+"""Postgres persistence for runs, step runs, events, guidance and workflow snapshots."""
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import datetime
 from types import TracebackType
@@ -12,6 +12,7 @@ from psycopg import sql
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+from pydantic import TypeAdapter
 
 from fledge.core import WorkItem
 
@@ -25,9 +26,17 @@ GuidanceSource = Literal["web", "trigger"]
 
 
 @dataclass(frozen=True)
+class WorkflowRef:
+    """What a new run records about the workflow it runs."""
+
+    name: str
+    steps: tuple[str, ...]
+    snapshot_hash: str
+
+
+@dataclass(frozen=True)
 class Run:
     id: UUID
-    trigger: str
     external_id: str
     origin: RunOrigin
     workflow: str
@@ -41,6 +50,10 @@ class Run:
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    snapshot_hash: str | None
+    """None only for runs created before workflows were snapshotted."""
+    steps: list[str] | None
+    """Step names, in order. None only for runs created before snapshots."""
 
     @property
     def work(self) -> WorkItem:
@@ -99,6 +112,7 @@ _RUN = _columns(Run)
 _STEP_RUN = _columns(StepRun)
 _EVENT = _columns(Event)
 _GUIDANCE = _columns(Guidance)
+_FILES = TypeAdapter(dict[str, str])
 
 
 def hash_token(token: str) -> str:
@@ -129,23 +143,42 @@ class Store:
     ) -> None:
         await self.close()
 
-    async def create_manual_run(
-        self, trigger: str, workflow: str, work: WorkItem
-    ) -> Run:
+    async def save_snapshot(self, snapshot_hash: str, files: Mapping[str, str]) -> None:
+        """Store workflow source under its hash. A repeated hash is a no-op."""
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO workflow_snapshots (hash, files) VALUES (%s, %s) "
+                "ON CONFLICT (hash) DO NOTHING",
+                (snapshot_hash, Jsonb(dict(files))),
+            )
+
+    async def get_snapshot_files(self, snapshot_hash: str) -> dict[str, str]:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT files FROM workflow_snapshots WHERE hash = %s",
+                (snapshot_hash,),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            raise LookupError(f"no workflow snapshot {snapshot_hash}")
+        return _FILES.validate_python(row[0])
+
+    async def create_manual_run(self, workflow: WorkflowRef, work: WorkItem) -> Run:
         async with (
             self._pool.connection() as conn,
             conn.cursor(row_factory=class_row(Run)) as cur,
         ):
             await cur.execute(
                 sql.SQL(
-                    "INSERT INTO runs (trigger, external_id, origin, workflow, "
-                    "title, body, url, repo_url) "
-                    "VALUES (%s, %s, 'manual', %s, %s, %s, %s, %s) RETURNING {}"
+                    "INSERT INTO runs (external_id, origin, workflow, steps, "
+                    "snapshot_hash, title, body, url, repo_url) "
+                    "VALUES (%s, 'manual', %s, %s, %s, %s, %s, %s, %s) RETURNING {}"
                 ).format(_RUN),
                 (
-                    trigger,
                     work.external_id,
-                    workflow,
+                    workflow.name,
+                    list(workflow.steps),
+                    workflow.snapshot_hash,
                     work.title,
                     work.body,
                     work.url,
@@ -155,9 +188,9 @@ class Store:
             return _one(await cur.fetchone())
 
     async def create_polled_run(
-        self, trigger: str, workflow: str, work: WorkItem
+        self, workflow: WorkflowRef, work: WorkItem
     ) -> Run | None:
-        """Insert a pending run unless any run exists for (trigger, external_id).
+        """Insert a pending run unless any run exists for (workflow, external_id).
 
         Returns None when one already exists.
         """
@@ -166,33 +199,34 @@ class Store:
             conn.transaction(),
             conn.cursor(row_factory=class_row(Run)) as cur,
         ):
-            # runs has no unique key on (trigger, external_id) because manual
+            # runs has no unique key on (workflow, external_id) because manual
             # launches may repeat an item, so concurrent polled inserts for the
             # same item are serialised with a transaction-scoped lock. The
             # INSERT starts after the lock is held and so sees any row a
             # competing transaction committed.
             await cur.execute(
                 "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
-                (trigger, work.external_id),
+                (workflow.name, work.external_id),
             )
             await cur.execute(
                 sql.SQL(
-                    "INSERT INTO runs (trigger, external_id, origin, workflow, "
-                    "title, body, url, repo_url) "
-                    "SELECT %s, %s, 'poll', %s, %s, %s, %s, %s "
+                    "INSERT INTO runs (external_id, origin, workflow, steps, "
+                    "snapshot_hash, title, body, url, repo_url) "
+                    "SELECT %s, 'poll', %s, %s, %s, %s, %s, %s, %s "
                     "WHERE NOT EXISTS ("
-                    "SELECT 1 FROM runs WHERE trigger = %s AND external_id = %s) "
+                    "SELECT 1 FROM runs WHERE workflow = %s AND external_id = %s) "
                     "RETURNING {}"
                 ).format(_RUN),
                 (
-                    trigger,
                     work.external_id,
-                    workflow,
+                    workflow.name,
+                    list(workflow.steps),
+                    workflow.snapshot_hash,
                     work.title,
                     work.body,
                     work.url,
                     work.repo_url,
-                    trigger,
+                    workflow.name,
                     work.external_id,
                 ),
             )

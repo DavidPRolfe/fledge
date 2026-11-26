@@ -24,7 +24,7 @@ def _format_time(value: datetime | None) -> str:
     return value.isoformat(sep=" ", timespec="seconds")
 
 
-def page_routes(store: Store, trigger_names: list[str]) -> APIRouter:
+def page_routes(store: Store, workflow_names: list[str]) -> APIRouter:
     router = APIRouter()
     env = jinja2.Environment(
         loader=jinja2.FileSystemLoader(_TEMPLATES),
@@ -37,7 +37,9 @@ def page_routes(store: Store, trigger_names: list[str]) -> APIRouter:
     @router.get("/", response_class=HTMLResponse)
     async def index() -> str:
         runs = [RunOut.model_validate(run) for run in await store.list_runs()]
-        return env.get_template("index.html").render(runs=runs, triggers=trigger_names)
+        return env.get_template("index.html").render(
+            runs=runs, workflows=workflow_names
+        )
 
     @router.get("/runs/{run_id}", response_class=HTMLResponse)
     async def run_page(run_id: UUID) -> str:

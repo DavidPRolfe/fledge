@@ -23,7 +23,6 @@ class RunOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    trigger: str
     external_id: str
     origin: RunOrigin
     workflow: str
@@ -79,7 +78,7 @@ class EventOut(BaseModel):
 
 
 class LaunchIn(BaseModel):
-    trigger: str
+    workflow: str
     ref: str
 
 

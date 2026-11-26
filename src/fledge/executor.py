@@ -24,6 +24,7 @@ from fledge.wire import (
     StepResult,
     StepRunContext,
 )
+from fledge.workflows import load_workflows
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,7 @@ class ExecutorContext:
 
 def execute(
     control_plane: ControlPlane,
-    load_workflow: Callable[[str], Workflow] = registry.load_workflow,
+    load: Callable[[Mapping[str, str]], Mapping[str, Workflow]] = load_workflows,
     workspace: Path = Path(WORKSPACE_PATH),
 ) -> int:
     """Run the step and report its result. Returns the process exit code."""
@@ -131,7 +132,7 @@ def execute(
     # Anything the step raises must reach the control plane as a failed result;
     # a container that just exits leaves the run waiting until the step timeout.
     try:
-        step = load_workflow(run.workflow).steps[run.step_index]
+        step = load(run.workflow_files)[run.workflow].steps[run.step_index]
         output = step.run(ctx)
     except Exception as err:
         logger.exception("step failed")

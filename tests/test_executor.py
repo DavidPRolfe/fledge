@@ -7,7 +7,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from fledge.core import Step, StepContext, Workflow
+from fledge.core import Step, StepContext, Trigger, Workflow
 from fledge.executor import ControlPlane, RetryPolicy, execute
 
 STEP_RUN_ID = uuid4()
@@ -28,6 +28,7 @@ CONTEXT = {
         "repo_url": "https://example.com/repo",
     },
     "outputs": {"first": {"summary": "earlier"}},
+    "workflow_files": {},
 }
 
 
@@ -36,6 +37,7 @@ class FakeControlPlane:
     """Records requests; `failures` responses are returned before normal ones."""
 
     guidance: list[str] = field(default_factory=list)
+    context: dict[str, object] = field(default_factory=lambda: CONTEXT)
     failures: list[Callable[[], httpx.Response]] = field(default_factory=list)
     requests: list[httpx.Request] = field(default_factory=list)
 
@@ -45,7 +47,7 @@ class FakeControlPlane:
             return self.failures.pop(0)()
         path = request.url.path
         if request.method == "GET" and path == BASE:
-            return httpx.Response(200, json=CONTEXT)
+            return httpx.Response(200, json=self.context)
         if request.method == "POST" and path == f"{BASE}/guidance/claim":
             bodies, self.guidance = self.guidance, []
             return httpx.Response(200, json={"bodies": bodies})
@@ -92,19 +94,64 @@ class FailingStep:
         raise ValueError("nothing works")
 
 
-def run_executor(fake: FakeControlPlane, step: Step, retry: RetryPolicy = FAST) -> int:
-    workflow = Workflow(name="fake", steps=[NamedStep("first"), step])
+class NoTrigger:
+    def start(self) -> Trigger:
+        raise AssertionError("step containers never start triggers")
+
+
+def control_plane(fake: FakeControlPlane, retry: RetryPolicy = FAST) -> ControlPlane:
     client = httpx.Client(
         base_url="http://control-plane",
         headers={"Authorization": f"Bearer {CREDENTIAL}"},
         transport=httpx.MockTransport(fake.handle),
     )
-    with client:
-        return execute(
-            ControlPlane(client, STEP_RUN_ID, retry),
-            load_workflow={"fake": workflow}.__getitem__,
-            workspace=Path("/workspace-under-test"),
-        )
+    return ControlPlane(client, STEP_RUN_ID, retry)
+
+
+def run_executor(fake: FakeControlPlane, step: Step, retry: RetryPolicy = FAST) -> int:
+    workflow = Workflow(
+        name="fake", trigger=NoTrigger(), steps=[NamedStep("first"), step]
+    )
+    return execute(
+        control_plane(fake, retry),
+        load=lambda files: {"fake": workflow},
+        workspace=Path("/workspace-under-test"),
+    )
+
+
+WORKFLOW_SOURCE = """\
+from fledge.core import Workflow
+
+from .shared import Echo
+
+
+class NoTrigger:
+    def start(self):
+        raise AssertionError("step containers never start triggers")
+
+
+fake = Workflow(name="fake", trigger=NoTrigger(), steps=[Echo("first"), Echo("echo")])
+"""
+SHARED_SOURCE = """\
+class Echo:
+    def __init__(self, name):
+        self.name = name
+
+    def run(self, ctx):
+        return {"step": self.name, "title": ctx.work.title}
+"""
+
+
+def test_runs_the_step_from_the_runs_workflow_files() -> None:
+    fake = FakeControlPlane(
+        context=CONTEXT
+        | {"workflow_files": {"fake.py": WORKFLOW_SOURCE, "shared.py": SHARED_SOURCE}}
+    )
+
+    assert execute(control_plane(fake), workspace=Path("/workspace-under-test")) == 0
+
+    [result] = fake.bodies("/result")
+    assert result["output"] == {"step": "echo", "title": "Fix it"}
 
 
 def test_success_reports_outputs_and_sends_token_on_every_call() -> None:

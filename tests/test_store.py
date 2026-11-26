@@ -6,7 +6,7 @@ import anyio
 import pytest
 
 from fledge.core import WorkItem
-from fledge.store import Run, Store, TerminalRunStatus, hash_token
+from fledge.store import Run, Store, TerminalRunStatus, WorkflowRef, hash_token
 
 pytestmark = pytest.mark.anyio
 
@@ -21,46 +21,66 @@ def work_item(external_id: str = "42") -> WorkItem:
     )
 
 
+SNAPSHOT_FILES = {"ticket.py": "# workflow source", "prompts/implement.md": "Fix"}
+TICKET_TO_PR = WorkflowRef(
+    name="ticket_to_pr",
+    steps=("clone", "implement", "open_pull_request"),
+    snapshot_hash="snapshot-under-test",
+)
+OTHER = WorkflowRef(name="other", steps=("only",), snapshot_hash="snapshot-under-test")
+
+
 @pytest.fixture
 async def store(database_url: str) -> AsyncIterator[Store]:
     async with Store(database_url) as store:
+        await store.save_snapshot(TICKET_TO_PR.snapshot_hash, SNAPSHOT_FILES)
         yield store
 
 
 async def make_run(store: Store, external_id: str = "42") -> Run:
-    return await store.create_manual_run(
-        "issues", "ticket_to_pr", work_item(external_id)
-    )
+    return await store.create_manual_run(TICKET_TO_PR, work_item(external_id))
+
+
+async def test_snapshot_is_stored_once_per_hash(store: Store) -> None:
+    await store.save_snapshot(TICKET_TO_PR.snapshot_hash, {"changed.py": ""})
+
+    files = await store.get_snapshot_files(TICKET_TO_PR.snapshot_hash)
+
+    assert files == SNAPSHOT_FILES
+    with pytest.raises(LookupError):
+        await store.get_snapshot_files("no-such-hash")
+
+
+async def test_run_records_its_workflow_steps_and_snapshot(store: Store) -> None:
+    run = await make_run(store)
+
+    assert run.workflow == "ticket_to_pr"
+    assert run.steps == ["clone", "implement", "open_pull_request"]
+    assert run.snapshot_hash == TICKET_TO_PR.snapshot_hash
 
 
 async def test_polled_run_is_created_once_per_item(store: Store) -> None:
-    first = await store.create_polled_run("issues", "ticket_to_pr", work_item("1"))
+    first = await store.create_polled_run(TICKET_TO_PR, work_item("1"))
     assert first is not None
     assert first.origin == "poll"
     assert first.status == "pending"
     assert first.work == work_item("1")
     assert await store.get_run(first.id) == first
 
-    assert (
-        await store.create_polled_run("issues", "ticket_to_pr", work_item("1")) is None
-    )
-    assert await store.create_polled_run("other", "ticket_to_pr", work_item("1"))
+    assert await store.create_polled_run(TICKET_TO_PR, work_item("1")) is None
+    assert await store.create_polled_run(OTHER, work_item("1"))
 
     manual = await make_run(store, "2")
     assert manual.origin == "manual"
     assert await make_run(store, "2") != manual
-    assert (
-        await store.create_polled_run("issues", "ticket_to_pr", work_item("2")) is None
-    )
+    assert await store.create_polled_run(TICKET_TO_PR, work_item("2")) is None
 
 
 async def test_concurrent_polls_create_one_run(store: Store) -> None:
     created: list[Run | None] = []
 
     async def poll() -> None:
-        created.append(
-            await store.create_polled_run("issues", "ticket_to_pr", work_item("7"))
-        )
+        created.append(await store.create_polled_run(TICKET_TO_PR, work_item("7")))
 
     async with anyio.create_task_group() as tg:
         for _ in range(8):

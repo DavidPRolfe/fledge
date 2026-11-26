@@ -26,8 +26,9 @@ Choices made here, with the reason for each:
 | --- | --- |
 | Python 3.13, one package (`fledge`) | The repo is already set up for it, and extension authors write plain Python classes. |
 | Workflows are Python objects: an ordered list of steps | Steps are already Python, so a second definition language would be a second thing to learn and to design. Linear only. |
-| Extensions are found through Python entry points | Standard library mechanism, no plugin framework. Built-ins register the same way as user code. |
-| One image for the control plane and every step | Guarantees the control plane and the step container see the same workflows. Teams extend it with `FROM`. |
+| Workflows are Python files in a directory the control plane loads | A workflow and the trigger that feeds it are one value, and changing one needs a restart, not a rebuild. Harnesses are still found through Python entry points. |
+| Each run carries a snapshot of the workflow code | Step containers import the snapshot the run started with, so the control plane and every step of a run see the same workflow, even if the directory changes mid-run. |
+| One image for the control plane and every step | Guarantees the same tools and libraries everywhere. Teams extend it with `FROM`. |
 | Step containers report over HTTP, not by connecting to Postgres | Keeps database credentials out of the container the agent runs in, and makes Docker and Kubernetes behave the same. |
 | A per-run workspace volume shared by the run's steps | Steps hand work to each other on disk. Nothing is pushed until the one step whose job is to publish. |
 | Postgres is also the queue | Runs are rows with a status. No broker. |
@@ -44,23 +45,25 @@ task adds `kubernetes`.
 | Component | Responsibility | Extension point? |
 | --- | --- | --- |
 | Trigger | Finds outside work to react to by polling, fetches one ticket on request, and finds new human comments on a ticket. | Yes |
-| Workflow | A named, ordered list of steps for one kind of work. | Yes |
+| Workflow | A named trigger plus an ordered list of steps for one kind of work, written in the workflows directory. | Yes |
 | Step | One unit of work, run in a container against the run's workspace. | Yes |
 | Harness | Adapter around one coding agent CLI. Runs one agent turn and can resume the same session. | Yes |
-| Poller | Calls each configured trigger on an interval. Creates runs for new work and guidance rows for new comments. | Fixed |
+| Poller | Calls each workflow's trigger on an interval. Creates runs for new work and guidance rows for new comments. | Fixed |
 | Orchestrator | Reconcile loop. Starts pending runs up to the concurrency limit, starts the next step, records outcomes, handles cancel and timeouts. | Fixed |
 | Runner | Creates the run workspace, starts and stops step containers, reports container state. Docker first; Kubernetes deferred. | Fixed |
-| Step executor | Entrypoint inside the step container (`fledge step-exec`). Loads the step, builds its context, runs it, reports the result. | Fixed |
+| Step executor | Entrypoint inside the step container (`fledge step-exec`). Imports the run's workflow snapshot, builds the step's context, runs it, reports the result. | Fixed |
 | API and web view | Public API for runs, cancel, guidance and manual launch. Internal API for step containers. The web view is a thin page over the public API. | Fixed |
 | Store | Postgres schema and queries. | Fixed |
 | CLI | `fledge serve`, `fledge step-exec`, `fledge migrate`, `fledge submit`. | Fixed |
 
 Shipped extensions:
 
-- Trigger: `github_issues` (open issues in one repo carrying a configured label).
+- Trigger: `GitHubIssues` (open issues in one repo carrying a configured label).
 - Steps: `CloneRepo`, `AgentStep`, `OpenPullRequest`.
 - Harnesses: `claude_code`, `codex`.
-- Workflow: `ticket_to_pr` = `CloneRepo`, `AgentStep` (implement), `OpenPullRequest`.
+- Step list: `ticket_to_pr.STEPS` = `CloneRepo`, `AgentStep` (implement),
+  `OpenPullRequest`. There is no shipped workflow: a workflow needs a trigger,
+  and a trigger needs a repository.
 
 ## 2. How the components interact
 
@@ -103,9 +106,10 @@ flowchart TB
 
 ### Life of a run
 
-1. **Detect.** The poller calls `poll()` on each configured trigger. For each
+1. **Detect.** The poller calls `poll()` on each workflow's trigger. For each
    returned work item it inserts a `pending` run unless a run already exists for
-   the same trigger and external id. A manual launch (web box or
+   the same workflow and external id. The run records the workflow's step names
+   and the hash of the workflow snapshot loaded at startup. A manual launch (web box or
    `fledge submit`) calls the trigger's `fetch()` and always inserts a run.
 2. **Start.** The orchestrator promotes `pending` runs to `running` while fewer
    than `FLEDGE_MAX_CONCURRENT_RUNS` are running, oldest first, and asks the runner to
@@ -116,7 +120,8 @@ flowchart TB
    secrets.
 4. **Execute.** Inside the container, the step executor fetches its context from
    the internal API (work item, workflow name, step index, earlier step
-   outputs), loads the step from the workflow, and calls `step.run(ctx)`. Log
+   outputs and the run's workflow snapshot), imports the snapshot, picks the
+   step from the workflow, and calls `step.run(ctx)`. Log
    lines and harness events are posted back as events.
 5. **Report.** The executor posts the step's result (outputs, or an error) and
    exits. The orchestrator sees the result in Postgres and starts the next step.
@@ -163,14 +168,15 @@ their HTTP calls for a short period so a restart does not fail the step.
 
 ### Data model
 
-Five tables. Ids are `uuid`, times are `timestamptz`.
+Six tables. Ids are `uuid`, times are `timestamptz`.
 
 | Table | Columns that matter |
 | --- | --- |
-| `runs` | `id`, `trigger`, `external_id`, `origin` (`poll` or `manual`), `workflow`, `title`, `body`, `url`, `repo_url`, `status` (`pending`, `running`, `succeeded`, `failed`, `cancelled`), `cancel_requested`, `error`, `created_at`, `started_at`, `finished_at` |
+| `runs` | `id`, `external_id`, `origin` (`poll` or `manual`), `workflow`, `steps` (step names), `snapshot_hash`, `title`, `body`, `url`, `repo_url`, `status` (`pending`, `running`, `succeeded`, `failed`, `cancelled`), `cancel_requested`, `error`, `created_at`, `started_at`, `finished_at` |
 | `step_runs` | `id`, `run_id`, `index`, `name`, `status`, `output` (`jsonb`), `error`, `token_hash`, `started_at`, `finished_at` |
 | `events` | `id` (`bigserial`), `run_id`, `step_run_id`, `at`, `kind` (`log`, `agent`, `state`), `message` |
 | `guidance` | `id`, `run_id`, `source` (`web` or `trigger`), `external_id`, `author`, `body`, `created_at`, `delivered_at`; unique on (`run_id`, `external_id`) |
+| `workflow_snapshots` | `hash`, `files` (`jsonb`, source text by relative path), `created_at` |
 | `schema_migrations` | `version`, `applied_at` |
 
 The work item is stored on the run rather than in its own table: the MVP never
@@ -185,7 +191,7 @@ Public, used by the web view and the CLI:
 | `GET /api/runs` | List runs, newest first. |
 | `GET /api/runs/{id}` | One run with its steps, outputs and guidance. |
 | `GET /api/runs/{id}/events?after={event_id}` | Events after a cursor. The page polls this. |
-| `POST /api/runs` | Launch by hand: `{"trigger": "...", "ref": "..."}`. |
+| `POST /api/runs` | Launch by hand: `{"workflow": "...", "ref": "..."}`. |
 | `POST /api/runs/{id}/cancel` | Request cancel. |
 | `POST /api/runs/{id}/guidance` | Add guidance: `{"body": "..."}`. |
 
@@ -205,23 +211,31 @@ A few lines of script poll the events endpoint. No frontend build.
 
 ## 3. Extension point interfaces
 
-Extensions are plain Python in an installed package, registered under entry
-point groups in that package's `pyproject.toml`:
+Workflows are Python files in the directory named by `FLEDGE_WORKFLOWS_DIR`
+(default `workflows`). At startup the control plane reads every file in it
+(skipping dotfiles and `__pycache__`) into a snapshot, stores the snapshot under
+its hash, imports the snapshot as a package, and collects every module-level
+`Workflow`. Startup fails if the directory is missing or has no Python files,
+if no workflow is found, if two share a name, or if a module fails to import.
+Modules in the directory import each other with relative imports, so custom
+triggers and steps can live next to the workflows that use them.
+
+Fledge reads workflows only from this directory, not from the repositories it
+works on. That is where things stand, not a rule: repository workflows are
+worth revisiting with a trust model for them, since their code would run in
+the control plane.
+
+Harnesses are the one extension point still found through an entry point group,
+because `AgentStep` names its harness:
 
 ```toml
-[project.entry-points."fledge.triggers"]
-github_issues = "fledge.builtin.triggers.github_issues:GitHubIssuesTrigger"
-
-[project.entry-points."fledge.workflows"]
-ticket_to_pr = "fledge.builtin.workflows.ticket_to_pr:ticket_to_pr"
-
 [project.entry-points."fledge.harnesses"]
 claude_code = "fledge.builtin.harnesses.claude_code:ClaudeCodeHarness"
 codex = "fledge.builtin.harnesses.codex:CodexHarness"
 ```
 
-Steps have no registry. A step is only ever reached through the workflow that
-contains it.
+Triggers and steps have no registry. They are reached only through the
+workflow that contains them.
 
 ### Trigger
 
@@ -258,17 +272,23 @@ class Trigger(Protocol):
 ```
 
 `poll()` is stateless on purpose: the factory deduplicates on
-(`trigger`, `external_id`), so a trigger keeps no cursor. `since` is the run's
+(`workflow`, `external_id`), so a trigger keeps no cursor. `since` is the run's
 start time, and comments are deduplicated on their external id.
 
-A trigger instance is declared in the `FLEDGE_TRIGGERS` JSON list. `name`
-identifies the instance, `type` is the entry point name, `workflow` names the
-workflow its runs use, and the remaining keys are passed to the trigger's
-constructor as keyword arguments:
+A workflow declares its trigger with a `TriggerSpec`. Workflow modules are
+also imported in step containers, which never poll, so declaring one must not
+do I/O or read secrets. The control plane calls `start()` once at startup:
 
+```python
+class TriggerSpec(Protocol):
+    def start(self) -> Trigger: ...
 ```
-FLEDGE_TRIGGERS='[{"name": "api-issues", "type": "github_issues", "workflow": "ticket_to_pr", "repo": "acme/api", "label": "fledge"}]'
-```
+
+`GitHubIssues(repo="acme/api", label="fledge")` is the built-in spec; its
+`start()` reads `GITHUB_TOKEN` and returns a `GitHubIssuesTrigger`.
+
+Manual launches go through the same trigger's `fetch()`; there is no separate
+manual trigger.
 
 ### Workflow
 
@@ -276,15 +296,17 @@ FLEDGE_TRIGGERS='[{"name": "api-issues", "type": "github_issues", "workflow": "t
 @dataclass(frozen=True)
 class Workflow:
     name: str
+    trigger: TriggerSpec
     steps: Sequence[Step]
 ```
 
-A workflow is a value, not a subclass. Step names must be unique within it.
-This example uses a different harness per step:
+A workflow is a value, not a subclass, with exactly one trigger. Step names
+must be unique within it. This example uses a different harness per step:
 
 ```python
 review_then_pr = Workflow(
     name="review_then_pr",
+    trigger=GitHubIssues(repo="acme/api", label="fledge"),
     steps=[
         CloneRepo(),
         AgentStep(name="implement", harness="claude_code", prompt=IMPLEMENT),
@@ -364,11 +386,12 @@ A harness needs its CLI present in the image. The base image ships both.
 
 ### What an extension author does
 
-1. Write a package with triggers, steps, harnesses or workflows and declare the
-   entry points.
-2. Build an image `FROM` the Fledge base image that installs the package and
-   any toolchains the target repositories need.
-3. Point `FLEDGE_TRIGGERS` at the trigger type and workflow name.
+1. Write workflows, and any custom triggers and steps they use, in the
+   workflows directory.
+2. For a custom harness, a third-party library, or toolchains the target
+   repositories need, build an image `FROM` the Fledge base image and set
+   `FLEDGE_IMAGE` to it.
+3. Restart `fledge serve` to pick up changes to the directory.
 
 ## 4. Deployment
 
@@ -386,7 +409,7 @@ FLEDGE_MAX_CONCURRENT_RUNS=1
 FLEDGE_POLL_INTERVAL_SECONDS=30
 FLEDGE_STEP_TIMEOUT_MINUTES=60
 FLEDGE_STEP_SECRETS=GITHUB_TOKEN,ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN  # passed to steps when set
-FLEDGE_TRIGGERS=[]
+FLEDGE_WORKFLOWS_DIR=workflows        # Python files defining the workflows
 ```
 
 Schema migrations are numbered SQL files applied by `fledge migrate`, which
@@ -395,8 +418,8 @@ Schema migrations are numbered SQL files applied by `fledge migrate`, which
 ### Local Docker
 
 A `compose.yaml` with two services: `postgres` and `fledge`. The `fledge`
-service mounts the Docker socket and reads secrets and settings from
-`.env`. The Docker runner creates one named volume per run and one container
+service mounts the Docker socket and `./workflows`, and reads secrets and
+settings from `.env`. The Docker runner creates one named volume per run and one container
 per step, attached to the compose network so steps can reach the control plane
 by service name.
 
@@ -405,7 +428,7 @@ The local flow:
 1. `docker compose up` starts Postgres and the factory. The web view is on
    `localhost:8000`.
 2. Either label issues so the trigger picks them up, or name them:
-   `fledge submit --trigger api-issues 12 14 15`. `submit` is a thin client for
+   `fledge submit --workflow api_tickets 12 14 15`. `submit` is a thin client for
    `POST /api/runs`.
 3. Runs queue as `pending` and are worked through `FLEDGE_MAX_CONCURRENT_RUNS` at a
    time. The web view shows each run's steps and live events.
@@ -421,7 +444,8 @@ setting to choose the platform.
 Plain manifests, applied with `kubectl apply -k`:
 
 - A `Deployment` with one replica running `fledge serve`, and a `Service`.
-- A `ConfigMap` holding the `FLEDGE_*` settings.
+- A `ConfigMap` holding the `FLEDGE_*` settings, and one holding the
+  workflows directory.
 - A `Secret` holding `DATABASE_URL` and the step secrets.
 - A `ServiceAccount` with a namespaced `Role` allowing it to manage `Jobs` and
   `PersistentVolumeClaims` and read `Pods`.

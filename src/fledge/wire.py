@@ -27,6 +27,8 @@ class StepRunContext(BaseModel):
     step_index: int
     work: WorkItem
     outputs: dict[str, dict[str, str]]
+    workflow_files: dict[str, str]
+    """The run's workflow snapshot: source text by relative path."""
 
 
 class EventIn(BaseModel):

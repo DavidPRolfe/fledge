@@ -1,7 +1,7 @@
 # Local factory: Postgres plus the control plane. Step containers are started
 # by the control plane through the Docker socket and join the same network.
 #
-#   Put the secrets and FLEDGE_TRIGGERS in .env (see README.md)
+#   Write workflows in ./workflows and put the secrets in .env (see README.md)
 #   docker compose up --build
 services:
   postgres:
@@ -27,6 +27,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://postgres:fledge@postgres/fledge
+      FLEDGE_WORKFLOWS_DIR: /etc/fledge/workflows
     ports:
       - "127.0.0.1:8000:8000"
     # SELinux (on by default in the Podman machine) otherwise blocks the
@@ -34,6 +35,7 @@ services:
     security_opt:
       - label=disable
     volumes:
+      - ./workflows:/etc/fledge/workflows:ro
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
     depends_on:
       postgres:

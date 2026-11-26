@@ -11,7 +11,7 @@ import pytest
 from fledge.builtin.steps.agent import AgentStep
 from fledge.builtin.steps.clone_repo import CloneRepo
 from fledge.builtin.steps.open_pull_request import OpenPullRequest
-from fledge.builtin.workflows.ticket_to_pr import ticket_to_pr
+from fledge.builtin.workflows.ticket_to_pr import STEPS
 from fledge.core import Harness, TurnResult, WorkItem
 
 GITHUB_CREDENTIAL = "ghp_test_credential"
@@ -311,7 +311,7 @@ def test_open_pull_request_rejects_non_github_urls(
 
 
 def test_ticket_to_pr_prompt_formats_with_work_item_fields() -> None:
-    [_, implement, _] = ticket_to_pr.steps
+    [_, implement, _] = STEPS
     assert isinstance(implement, AgentStep)
 
     prompt = implement.prompt.format(title="T", body="B {not a field}", url="U")

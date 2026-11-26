@@ -1,7 +1,7 @@
 from fledge.builtin.steps.agent import AgentStep
 from fledge.builtin.steps.clone_repo import CloneRepo
 from fledge.builtin.steps.open_pull_request import OpenPullRequest
-from fledge.core import Workflow
+from fledge.core import Step
 
 IMPLEMENT = """\
 Resolve this ticket by changing the repository in the current working directory.
@@ -18,11 +18,8 @@ finish. End with a short summary of what you changed and why; it becomes the
 pull request description.
 """
 
-ticket_to_pr = Workflow(
-    name="ticket_to_pr",
-    steps=[
-        CloneRepo(),
-        AgentStep(name="implement", harness="claude_code", prompt=IMPLEMENT),
-        OpenPullRequest(),
-    ],
+STEPS: tuple[Step, ...] = (
+    CloneRepo(),
+    AgentStep(name="implement", harness="claude_code", prompt=IMPLEMENT),
+    OpenPullRequest(),
 )

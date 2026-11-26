@@ -10,7 +10,7 @@
 <p>
   Ticket:
   {% if run.url is http_url %}<a href="{{ run.url }}">{{ run.url }}</a>{% else %}{{ run.url }}{% endif %}
-  <span class="muted">({{ run.trigger }}, {{ run.workflow }})</span>
+  <span class="muted">({{ run.workflow }})</span>
 </p>
 <p id="run-error" class="error">{{ run.error or "" }}</p>
 <p>

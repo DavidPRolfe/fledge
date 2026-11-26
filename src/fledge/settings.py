@@ -1,28 +1,8 @@
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
-
-_TRIGGER_KEYS = {"name", "type", "workflow", "options"}
-
-
-class TriggerConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    type: str
-    workflow: str
-    options: dict[str, object] = {}
-
-    @model_validator(mode="before")
-    @classmethod
-    def _collect_options(cls, data: object) -> object:
-        if not isinstance(data, dict) or "options" in data:
-            return data
-        fixed = {k: v for k, v in data.items() if k in _TRIGGER_KEYS}
-        options = {k: v for k, v in data.items() if k not in _TRIGGER_KEYS}
-        return {**fixed, "options": options}
 
 
 class Settings(BaseSettings):
@@ -50,8 +30,8 @@ class Settings(BaseSettings):
     step_source_dir: Path | None = None
     """Host directory bind-mounted over the image's src/ in step containers, so
     a local checkout's step code runs without rebuilding the image."""
-    triggers: list[TriggerConfig] = []
-    """JSON list of trigger instances."""
+    workflows_dir: Path = Path("workflows")
+    """Directory of Python files defining the workflows, each with its trigger."""
 
     @field_validator("step_secrets", mode="before")
     @classmethod

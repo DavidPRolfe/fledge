@@ -1,6 +1,7 @@
 """Trigger for open GitHub issues in one repository that carry a label."""
 
 import os
+from dataclasses import dataclass
 from datetime import datetime
 
 import httpx
@@ -168,3 +169,14 @@ class GitHubIssuesTrigger:
             for comment in _COMMENTS.validate_json(page)
             if comment.created_at > since and comment.user.type != "Bot"
         ]
+
+
+@dataclass(frozen=True)
+class GitHubIssues:
+    """Declares a GitHubIssuesTrigger in workflow code; see TriggerSpec."""
+
+    repo: str
+    label: str
+
+    def start(self) -> GitHubIssuesTrigger:
+        return GitHubIssuesTrigger(self.repo, self.label)

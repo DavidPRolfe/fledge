@@ -4,27 +4,20 @@ from uuid import UUID
 
 import pytest
 
-from fledge.core import StepContext, Workflow, WorkItem
+from fledge.core import WorkItem
 from fledge.orchestrator import Orchestrator
 from fledge.runner.base import ContainerState, StepSpec
 from fledge.settings import Settings
-from fledge.store import Run, StepRun, Store, hash_token
+from fledge.store import Run, StepRun, Store, WorkflowRef, hash_token
 from fledge.wire import API_URL_ENV, STEP_RUN_ID_ENV, STEP_TOKEN_ENV
 
 pytestmark = pytest.mark.anyio
 
 
-@dataclass(frozen=True)
-class FakeStep:
-    name: str
-
-    def run(self, ctx: StepContext) -> dict[str, str]:
-        raise AssertionError("steps run in containers, not in the orchestrator")
-
-
+SNAPSHOT_HASH = "snapshot-under-test"
 WORKFLOWS = {
-    "two_steps": Workflow(name="two_steps", steps=[FakeStep("a"), FakeStep("b")]),
-    "one_step": Workflow(name="one_step", steps=[FakeStep("only")]),
+    "two_steps": WorkflowRef("two_steps", ("a", "b"), SNAPSHOT_HASH),
+    "one_step": WorkflowRef("one_step", ("only",), SNAPSHOT_HASH),
 }
 
 
@@ -32,12 +25,15 @@ WORKFLOWS = {
 class FakeRunner:
     workspaces: set[UUID] = field(default_factory=set)
     deleted_workspaces: set[UUID] = field(default_factory=set)
+    failing_workspaces: set[UUID] = field(default_factory=set)
     started: list[StepSpec] = field(default_factory=list)
     stopped: set[UUID] = field(default_factory=set)
     states: dict[UUID, ContainerState] = field(default_factory=dict)
     before_state: Callable[[UUID], Awaitable[None]] | None = None
 
     async def create_workspace(self, run_id: UUID) -> None:
+        if run_id in self.failing_workspaces:
+            raise RuntimeError("volume could not be created")
         self.workspaces.add(run_id)
 
     async def start_step(self, spec: StepSpec) -> None:
@@ -73,6 +69,7 @@ def make_config(**overrides: object) -> Settings:
 @pytest.fixture
 async def store(database_url: str) -> AsyncIterator[Store]:
     async with Store(database_url) as store:
+        await store.save_snapshot(SNAPSHOT_HASH, {})
         yield store
 
 
@@ -82,7 +79,7 @@ def runner() -> FakeRunner:
 
 
 def orchestrator(store: Store, runner: FakeRunner, **config: object) -> Orchestrator:
-    return Orchestrator(store, runner, make_config(**config), WORKFLOWS.__getitem__)
+    return Orchestrator(store, runner, make_config(**config))
 
 
 async def make_run(store: Store, workflow: str, external_id: str = "1") -> Run:
@@ -93,7 +90,7 @@ async def make_run(store: Store, workflow: str, external_id: str = "1") -> Run:
         url=f"https://example.test/{external_id}",
         repo_url="https://example.test/repo.git",
     )
-    return await store.create_manual_run("issues", workflow, work)
+    return await store.create_manual_run(WORKFLOWS[workflow], work)
 
 
 async def get_run(store: Store, run: Run) -> Run:
@@ -360,8 +357,9 @@ async def test_one_broken_run_does_not_block_others(
     store: Store, runner: FakeRunner
 ) -> None:
     orch = orchestrator(store, runner)
-    broken = await make_run(store, "no_such_workflow", "1")
+    broken = await make_run(store, "one_step", "1")
     healthy = await make_run(store, "one_step", "2")
+    runner.failing_workspaces.add(broken.id)
 
     await orch.tick()
 

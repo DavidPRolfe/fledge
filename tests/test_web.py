@@ -6,13 +6,17 @@ import httpx
 import pytest
 
 from fledge.core import Comment, WorkItem
-from fledge.settings import Settings, TriggerConfig
-from fledge.store import Run, StepRun, Store, hash_token
+from fledge.store import Run, StepRun, Store, WorkflowRef, hash_token
 from fledge.web.app import create_app
+from fledge.workflows import TriggerBinding
 
 pytestmark = pytest.mark.anyio
 
 UNTRUSTED_TITLE = "<script>alert(1)</script>"
+SNAPSHOT_FILES = {"ticket_to_pr.py": "# workflow source"}
+TICKET_TO_PR = WorkflowRef(
+    "ticket_to_pr", ("clone", "implement", "open_pull_request"), "snapshot-under-test"
+)
 
 
 def work_item(external_id: str, title: str = "Fix the thing") -> WorkItem:
@@ -46,28 +50,21 @@ class FakeTrigger:
 @pytest.fixture
 async def store(database_url: str) -> AsyncIterator[Store]:
     async with Store(database_url) as store:
+        await store.save_snapshot(TICKET_TO_PR.snapshot_hash, SNAPSHOT_FILES)
         yield store
 
 
 @pytest.fixture
 async def client(store: Store) -> AsyncIterator[httpx.AsyncClient]:
-    config = Settings(
-        image="fledge:test",
-        api_url="http://fledge:8000",
-        docker_network="fledge",
-        triggers=[TriggerConfig(name="issues", type="fake", workflow="ticket_to_pr")],
-    )
     trigger = FakeTrigger({"7": work_item("7"), "8": work_item("8", UNTRUSTED_TITLE)})
-    app = create_app(store, {"issues": trigger}, config)
+    app = create_app(store, {"ticket_to_pr": TriggerBinding(trigger, TICKET_TO_PR)})
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
 
 
 async def make_run(store: Store, title: str = "Fix the thing") -> Run:
-    return await store.create_manual_run(
-        "issues", "ticket_to_pr", work_item("1", title)
-    )
+    return await store.create_manual_run(TICKET_TO_PR, work_item("1", title))
 
 
 async def make_step(
@@ -85,7 +82,9 @@ def bearer(token: str) -> dict[str, str]:
 async def test_launch_creates_manual_run(
     client: httpx.AsyncClient, store: Store
 ) -> None:
-    response = await client.post("/api/runs", json={"trigger": "issues", "ref": "7"})
+    response = await client.post(
+        "/api/runs", json={"workflow": "ticket_to_pr", "ref": "7"}
+    )
     assert response.status_code == 201
     body = response.json()
     assert body["origin"] == "manual"
@@ -100,11 +99,11 @@ async def test_launch_creates_manual_run(
 @pytest.mark.parametrize(
     ("payload", "detail"),
     [
-        ({"trigger": "nope", "ref": "7"}, "unknown trigger 'nope'"),
-        ({"trigger": "issues", "ref": "99"}, "no issue 99"),
+        ({"workflow": "nope", "ref": "7"}, "unknown workflow 'nope'"),
+        ({"workflow": "ticket_to_pr", "ref": "99"}, "no issue 99"),
     ],
 )
-async def test_launch_rejects_unknown_trigger_or_ref(
+async def test_launch_rejects_unknown_workflow_or_ref(
     client: httpx.AsyncClient, store: Store, payload: dict[str, str], detail: str
 ) -> None:
     response = await client.post("/api/runs", json=payload)
@@ -286,6 +285,7 @@ async def test_internal_context_has_earlier_outputs(
             "repo_url": "https://example.test/repo.git",
         },
         "outputs": {"clone": {"branch": "fledge/1"}},
+        "workflow_files": SNAPSHOT_FILES,
     }
 
 
@@ -369,7 +369,7 @@ async def test_index_page_lists_runs_escaped(
     assert f'href="/runs/{run.id}"' in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert UNTRUSTED_TITLE not in html
-    assert '<option value="issues">issues</option>' in html
+    assert '<option value="ticket_to_pr">ticket_to_pr</option>' in html
 
 
 async def test_run_page_renders_steps_and_guidance(

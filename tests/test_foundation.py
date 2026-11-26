@@ -1,9 +1,16 @@
+from pathlib import Path
+
 import psycopg
 import pytest
 
-from fledge.core import Workflow
+from fledge.core import Trigger, Workflow
 from fledge.db import migrate
 from fledge.settings import Settings
+
+
+class _NoTrigger:
+    def start(self) -> Trigger:
+        raise AssertionError("not started in this test")
 
 
 class _Step:
@@ -16,22 +23,18 @@ class _Step:
 
 def test_workflow_rejects_duplicate_step_names() -> None:
     with pytest.raises(ValueError, match="duplicate step names"):
-        Workflow(name="w", steps=[_Step("a"), _Step("a")])
+        Workflow(name="w", trigger=_NoTrigger(), steps=[_Step("a"), _Step("a")])
 
 
 def test_settings_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FLEDGE_STEP_SECRETS", "GITHUB_TOKEN, CLAUDE_CODE_OAUTH_TOKEN")
-    monkeypatch.setenv(
-        "FLEDGE_TRIGGERS",
-        '[{"name": "api-issues", "type": "github_issues", "workflow": "ticket_to_pr",'
-        ' "repo": "acme/api", "label": "fledge"}]',
-    )
+    monkeypatch.setenv("FLEDGE_WORKFLOWS_DIR", "/etc/fledge/workflows")
 
     settings = Settings()
 
     assert settings.max_concurrent_runs == 1
     assert settings.step_secrets == ["GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]
-    assert settings.triggers[0].options == {"repo": "acme/api", "label": "fledge"}
+    assert settings.workflows_dir == Path("/etc/fledge/workflows")
 
 
 def test_migrate_creates_schema_and_is_repeatable(database_url: str) -> None:
@@ -46,5 +49,5 @@ def test_migrate_creates_schema_and_is_repeatable(database_url: str) -> None:
         }
         versions = conn.execute("SELECT count(*) FROM schema_migrations").fetchone()
 
-    assert {"runs", "step_runs", "events", "guidance"} <= tables
-    assert versions == (1,)
+    assert {"runs", "step_runs", "events", "guidance", "workflow_snapshots"} <= tables
+    assert versions == (2,)

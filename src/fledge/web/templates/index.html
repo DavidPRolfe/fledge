@@ -4,8 +4,8 @@
 
 <h2>Launch</h2>
 <form id="launch">
-  <select name="trigger" required>
-    {% for name in triggers %}<option value="{{ name }}">{{ name }}</option>{% endfor %}
+  <select name="workflow" required>
+    {% for name in workflows %}<option value="{{ name }}">{{ name }}</option>{% endfor %}
   </select>
   <input name="ref" placeholder="ticket ref" required>
   <button type="submit">Launch</button>
@@ -13,12 +13,12 @@
 <p id="launch-error" class="error"></p>
 
 <table>
-  <thead><tr><th>Title</th><th>Trigger</th><th>Status</th><th>Created</th></tr></thead>
+  <thead><tr><th>Title</th><th>Workflow</th><th>Status</th><th>Created</th></tr></thead>
   <tbody>
   {% for run in runs %}
     <tr>
       <td><a href="/runs/{{ run.id }}">{{ run.title }}</a></td>
-      <td>{{ run.trigger }}</td>
+      <td>{{ run.workflow }}</td>
       <td class="status">{{ run.status }}</td>
       <td>{{ run.created_at | time }}</td>
     </tr>
@@ -38,7 +38,7 @@
     const response = await fetch("/api/runs", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({trigger: data.get("trigger"), ref: data.get("ref")}),
+      body: JSON.stringify({workflow: data.get("workflow"), ref: data.get("ref")}),
     });
     const body = await response.json().catch(() => ({detail: response.status + " " + response.statusText}));
     if (response.status === 201) {

@@ -47,6 +47,18 @@ class Trigger(Protocol):
         ...
 
 
+class TriggerSpec(Protocol):
+    """A workflow's trigger as declared in workflow code.
+
+    Declaring one must not do I/O or read secrets: workflow modules are also
+    imported in step containers, which never start the trigger.
+    """
+
+    def start(self) -> Trigger:
+        """Build the live trigger. Called once, in the control plane."""
+        ...
+
+
 @runtime_checkable
 class Harness(Protocol):
     def run_turn(
@@ -104,6 +116,7 @@ class Step(Protocol):
 @dataclass(frozen=True)
 class Workflow:
     name: str
+    trigger: TriggerSpec
     steps: Sequence[Step]
 
     def __post_init__(self) -> None:

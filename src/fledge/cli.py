@@ -10,12 +10,12 @@ import uvicorn
 from fledge.db import migrate
 from fledge.executor import execute_from_env
 from fledge.orchestrator import Orchestrator
-from fledge.poller import Poller, load_triggers
-from fledge.registry import load_workflow
+from fledge.poller import Poller
 from fledge.runner.docker import DockerRunner
 from fledge.settings import Settings
 from fledge.store import Store
 from fledge.web.app import create_app
+from fledge.workflows import load_workflows, read_snapshot, start_triggers
 
 logger = logging.getLogger(__name__)
 
@@ -23,16 +23,22 @@ DATABASE_URL_ENV = "DATABASE_URL"
 
 
 async def _serve(config: Settings, database_url: str, host: str, port: int) -> None:
-    bindings = load_triggers(config)
+    snapshot = read_snapshot(config.workflows_dir)
+    workflows = load_workflows(snapshot.files)
+    bindings = start_triggers(snapshot.hash, workflows)
+    logger.info(
+        "loaded workflows %s from %s (snapshot %s)",
+        ", ".join(sorted(workflows)),
+        config.workflows_dir,
+        snapshot.hash[:12],
+    )
     async with Store(database_url) as store:
-        app = create_app(
-            store, {name: b.trigger for name, b in bindings.items()}, config
-        )
+        await store.save_snapshot(snapshot.hash, snapshot.files)
+        app = create_app(store, bindings)
         orchestrator = Orchestrator(
             store,
             DockerRunner(config.docker_network, source_dir=config.step_source_dir),
             config,
-            load_workflow,
         )
         poller = Poller(store, bindings, config)
         server = uvicorn.Server(
@@ -51,10 +57,10 @@ async def _serve(config: Settings, database_url: str, host: str, port: int) -> N
                 loop.cancel()
 
 
-def _submit(url: str, trigger: str, refs: list[str]) -> None:
+def _submit(url: str, workflow: str, refs: list[str]) -> None:
     with httpx.Client(base_url=url) as client:
         for ref in refs:
-            response = client.post("/api/runs", json={"trigger": trigger, "ref": ref})
+            response = client.post("/api/runs", json={"workflow": workflow, "ref": ref})
             if response.status_code == httpx.codes.UNPROCESSABLE_ENTITY:
                 raise SystemExit(f"{ref}: {response.json()['detail']}")
             response.raise_for_status()
@@ -74,9 +80,7 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("step-exec", help="run one step (inside a step container)")
 
     submit = commands.add_parser("submit", help="launch runs for tickets by hand")
-    submit.add_argument(
-        "--trigger", required=True, help="trigger name from FLEDGE_TRIGGERS"
-    )
+    submit.add_argument("--workflow", required=True, help="workflow name")
     submit.add_argument("--url", default="http://localhost:8000")
     submit.add_argument("refs", nargs="+", metavar="ref")
     return parser
@@ -97,4 +101,4 @@ def main() -> None:
         case "step-exec":
             sys.exit(execute_from_env())
         case "submit":
-            _submit(args.url, args.trigger, args.refs)
+            _submit(args.url, args.workflow, args.refs)

@@ -4,10 +4,8 @@ import asyncio
 import logging
 import os
 import secrets
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
-from fledge.core import Workflow
 from fledge.runner.base import ContainerState, Runner, StepSpec
 from fledge.settings import Settings
 from fledge.store import Run, StepRun, Store, TerminalRunStatus, hash_token
@@ -24,7 +22,6 @@ class Orchestrator:
         store: Store,
         runner: Runner,
         config: Settings,
-        load_workflow: Callable[[str], Workflow],
     ) -> None:
         # Alternatives such as ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN
         # share the default list, so an unset one is expected; a step that
@@ -40,7 +37,6 @@ class Orchestrator:
         self._store = store
         self._runner = runner
         self._config = config
-        self._load_workflow = load_workflow
 
     async def run_forever(self) -> None:
         while True:
@@ -51,8 +47,7 @@ class Orchestrator:
         await self._cancel_pending()
         await self._promote_pending()
         for run in await self._store.list_runs_with_status("running"):
-            # A run that cannot be reconciled (a broken workflow, a runner
-            # error) must not hold up every other run. It is retried on the
+            # A run that cannot be reconciled (a runner error, say) must not hold up every other run. It is retried on the
             # next tick, since all state is re-read from the store and runner.
             try:
                 await self._reconcile(run)
@@ -105,18 +100,17 @@ class Orchestrator:
         await self._end_run(run, latest, "cancelled", None)
 
     async def _advance(self, run: Run, finished: StepRun) -> None:
-        steps = self._load_workflow(run.workflow).steps
-        if finished.step_index + 1 >= len(steps):
+        if finished.step_index + 1 >= len(_steps(run)):
             await self._end_run(run, finished, "succeeded", None)
             return
         await self._runner.stop_step(finished.id)
         await self._start_step(run, finished.step_index + 1, finished)
 
     async def _start_step(self, run: Run, index: int, previous: StepRun | None) -> None:
-        step = self._load_workflow(run.workflow).steps[index]
+        name = _steps(run)[index]
         token = secrets.token_urlsafe(32)
         step_run = await self._store.create_step_run(
-            run.id, index, step.name, hash_token(token)
+            run.id, index, name, hash_token(token)
         )
         env = {
             **self._secrets,
@@ -139,7 +133,7 @@ class Orchestrator:
                 run.id, "state", _step_outcome(previous), previous.id
             )
         await self._store.append_event(
-            run.id, "state", f"step {step.name} started", step_run.id
+            run.id, "state", f"step {name} started", step_run.id
         )
 
     async def _check_running_step(self, run: Run, step_run: StepRun) -> None:
@@ -191,6 +185,12 @@ class Orchestrator:
             )
         message = f"run {status}" + (f": {error}" if error else "")
         await self._store.append_event(run.id, "state", message)
+
+
+def _steps(run: Run) -> list[str]:
+    if run.steps is None:
+        raise RuntimeError(f"run {run.id} predates workflow snapshots")
+    return run.steps
 
 
 def _step_outcome(step_run: StepRun) -> str:

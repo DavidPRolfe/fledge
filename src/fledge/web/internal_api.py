@@ -46,6 +46,8 @@ def internal_routes(store: Store) -> APIRouter:
         run = await store.get_run(step_run.run_id)
         if run is None:
             raise RuntimeError(f"step run {step_run.id} has no run")
+        if run.snapshot_hash is None:
+            raise RuntimeError(f"run {run.id} predates workflow snapshots")
         earlier = [
             s
             for s in await store.list_step_runs(run.id)
@@ -57,6 +59,7 @@ def internal_routes(store: Store) -> APIRouter:
             step_index=step_run.step_index,
             work=run.work,
             outputs={s.name: s.output for s in earlier},
+            workflow_files=await store.get_snapshot_files(run.snapshot_hash),
         )
 
     @router.post("/events", status_code=status.HTTP_204_NO_CONTENT)

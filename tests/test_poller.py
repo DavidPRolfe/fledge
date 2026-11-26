@@ -5,9 +5,10 @@ from datetime import datetime
 import pytest
 
 from fledge.core import Comment, WorkItem
-from fledge.poller import Poller, TriggerBinding
+from fledge.poller import Poller
 from fledge.settings import Settings
-from fledge.store import Store
+from fledge.store import Store, WorkflowRef
+from fledge.workflows import TriggerBinding
 
 pytestmark = pytest.mark.anyio
 
@@ -49,29 +50,37 @@ class BrokenTrigger(FakeTrigger):
 CONFIG = Settings(image="fledge:test", api_url="http://fledge:8000", docker_network="n")
 
 
+SNAPSHOT_HASH = "snapshot-under-test"
+
+
+def bind(name: str, trigger: FakeTrigger) -> dict[str, TriggerBinding]:
+    return {name: TriggerBinding(trigger, WorkflowRef(name, ("only",), SNAPSHOT_HASH))}
+
+
 @pytest.fixture
 async def store(database_url: str) -> AsyncIterator[Store]:
     async with Store(database_url) as store:
+        await store.save_snapshot(SNAPSHOT_HASH, {})
         yield store
 
 
 async def test_items_become_runs_once(store: Store) -> None:
     trigger = FakeTrigger(items=[work_item("1"), work_item("2")])
-    poller = Poller(store, {"issues": TriggerBinding(trigger, "ticket_to_pr")}, CONFIG)
+    poller = Poller(store, bind("ticket_to_pr", trigger), CONFIG)
 
     await poller.poll_once()
     await poller.poll_once()
 
     runs = await store.list_runs()
     assert sorted(run.external_id for run in runs) == ["1", "2"]
-    assert {(run.trigger, run.workflow, run.origin) for run in runs} == {
-        ("issues", "ticket_to_pr", "poll")
+    assert {(run.workflow, tuple(run.steps or ()), run.origin) for run in runs} == {
+        ("ticket_to_pr", ("only",), "poll")
     }
 
 
 async def test_comments_on_active_runs_become_guidance_once(store: Store) -> None:
     trigger = FakeTrigger(items=[work_item("1")])
-    poller = Poller(store, {"issues": TriggerBinding(trigger, "ticket_to_pr")}, CONFIG)
+    poller = Poller(store, bind("ticket_to_pr", trigger), CONFIG)
     await poller.poll_once()
     [run] = await store.list_runs()
 
@@ -92,7 +101,7 @@ async def test_comments_on_active_runs_become_guidance_once(store: Store) -> Non
 
 async def test_finished_runs_are_not_polled_for_guidance(store: Store) -> None:
     trigger = FakeTrigger(items=[work_item("1")])
-    poller = Poller(store, {"issues": TriggerBinding(trigger, "ticket_to_pr")}, CONFIG)
+    poller = Poller(store, bind("ticket_to_pr", trigger), CONFIG)
     await poller.poll_once()
     await poller.poll_once()
     [run] = await store.list_runs()
@@ -109,15 +118,12 @@ async def test_one_failing_trigger_does_not_block_another(
     healthy = FakeTrigger(items=[work_item("1")])
     poller = Poller(
         store,
-        {
-            "broken": TriggerBinding(BrokenTrigger(), "ticket_to_pr"),
-            "healthy": TriggerBinding(healthy, "ticket_to_pr"),
-        },
+        bind("broken", BrokenTrigger()) | bind("healthy", healthy),
         CONFIG,
     )
 
     await poller.poll_once()
 
     [run] = await store.list_runs()
-    assert run.trigger == "healthy"
-    assert "polling trigger 'broken' failed" in caplog.text
+    assert run.workflow == "healthy"
+    assert "polling the trigger of workflow 'broken' failed" in caplog.text

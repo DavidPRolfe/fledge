@@ -6,7 +6,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from fledge.core import Trigger
 from fledge.store import Store
 from fledge.web.schemas import (
     EventOut,
@@ -19,32 +18,29 @@ from fledge.web.schemas import (
     guidance_out,
     run_detail,
 )
+from fledge.workflows import TriggerBinding
 
 
 async def _launch(
-    store: Store,
-    triggers: Mapping[str, Trigger],
-    workflows: Mapping[str, str],
-    body: LaunchIn,
+    store: Store, workflows: Mapping[str, TriggerBinding], body: LaunchIn
 ) -> RunOut:
-    # An unknown trigger name is a bad request body, like a bad ref, so both
+    # An unknown workflow name is a bad request body, like a bad ref, so both
     # are 422 rather than 404.
-    trigger = triggers.get(body.trigger)
-    if trigger is None:
+    binding = workflows.get(body.workflow)
+    if binding is None:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, f"unknown trigger {body.trigger!r}"
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"unknown workflow {body.workflow!r}",
         )
     try:
-        work = await trigger.fetch(body.ref)
+        work = await binding.trigger.fetch(body.ref)
     except ValueError as err:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(err)) from err
-    run = await store.create_manual_run(body.trigger, workflows[body.trigger], work)
+    run = await store.create_manual_run(binding.workflow, work)
     return RunOut.model_validate(run)
 
 
-def public_routes(
-    store: Store, triggers: Mapping[str, Trigger], workflows: Mapping[str, str]
-) -> APIRouter:
+def public_routes(store: Store, workflows: Mapping[str, TriggerBinding]) -> APIRouter:
     router = APIRouter(prefix="/api")
 
     @router.get("/runs")
@@ -65,7 +61,7 @@ def public_routes(
 
     @router.post("/runs", status_code=status.HTTP_201_CREATED)
     async def launch(body: LaunchIn) -> RunOut:
-        return await _launch(store, triggers, workflows, body)
+        return await _launch(store, workflows, body)
 
     @router.post("/runs/{run_id}/cancel")
     async def cancel(run_id: UUID) -> RunOut:
