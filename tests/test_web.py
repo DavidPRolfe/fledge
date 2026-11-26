@@ -33,6 +33,9 @@ class FakeTrigger:
     def __init__(self, items: dict[str, WorkItem]) -> None:
         self.items = items
 
+    async def check(self) -> None:
+        pass
+
     async def poll(self) -> list[WorkItem]:
         return list(self.items.values())
 

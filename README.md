@@ -27,7 +27,11 @@ registered through entry points. See section 3 of the architecture doc.
 
 You need Docker with Compose, a GitHub token that can read issues, push
 branches and open pull requests on the target repository, and credentials for
-Claude Code: either an Anthropic API key or a Claude subscription token.
+Claude Code: either an Anthropic API key or a Claude subscription token. For a
+fine-grained token, grant Contents read/write, Issues read and Pull requests
+read/write. At startup fledge checks that the token can see the repository,
+read its issues and push to it, and exits with a message if it can't; it can't
+check permission to open pull requests without opening one.
 
 1. Write a workflow in `workflows/` (any `.py` file; the directory is
    git-ignored), pointing the trigger at your repository and label. This

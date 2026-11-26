@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from fledge.builtin.triggers.github_issues import GitHubIssuesTrigger, MissingTokenError
-from fledge.core import Comment, Trigger, WorkItem
+from fledge.core import Comment, Trigger, TriggerCheckError, WorkItem
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -158,3 +158,45 @@ async def test_http_error_propagates() -> None:
 
     with pytest.raises(httpx.HTTPStatusError):
         await make_trigger(handler).poll()
+
+
+def access(repo: int = 200, issues: int = 200, push: int = 200) -> Handler:
+    def handler(request: httpx.Request) -> httpx.Response:
+        match (request.url.host, request.url.path):
+            case ("api.github.com", "/repos/acme/widgets"):
+                return httpx.Response(repo, json={})
+            case ("api.github.com", "/repos/acme/widgets/issues"):
+                return httpx.Response(issues, json=[])
+            case ("github.com", "/acme/widgets.git/info/refs"):
+                assert request.url.params["service"] == "git-receive-pack"
+                assert request.headers["Authorization"].startswith("Basic ")
+                return httpx.Response(push)
+        raise AssertionError(f"unexpected request {request.url}")
+
+    return handler
+
+
+@pytest.mark.anyio
+async def test_check_passes_when_the_token_can_read_and_push() -> None:
+    await make_trigger(access()).check()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("handler", "message"),
+    [
+        (access(repo=401, issues=401, push=401), "rejected GITHUB_TOKEN"),
+        (access(repo=404, issues=404, push=404), "cannot see acme/widgets"),
+        (access(issues=403), "cannot read the issues of acme/widgets"),
+        (access(push=403), "cannot push to acme/widgets"),
+    ],
+)
+async def test_check_names_the_missing_access(handler: Handler, message: str) -> None:
+    with pytest.raises(TriggerCheckError, match=message):
+        await make_trigger(handler).check()
+
+
+@pytest.mark.anyio
+async def test_check_lets_other_github_errors_through() -> None:
+    with pytest.raises(httpx.HTTPStatusError):
+        await make_trigger(access(repo=500)).check()

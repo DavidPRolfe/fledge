@@ -7,9 +7,10 @@ from datetime import datetime
 import httpx
 from pydantic import BaseModel, TypeAdapter
 
-from fledge.core import Comment, WorkItem
+from fledge.core import Comment, TriggerCheckError, WorkItem
 
 API_URL = "https://api.github.com"
+GIT_URL = "https://github.com"
 
 
 class MissingTokenError(RuntimeError):
@@ -110,6 +111,48 @@ class GitHubIssuesTrigger:
             if next_url is None:
                 return pages
             response = await client.get(next_url)
+
+    async def check(self) -> None:
+        """Check GITHUB_TOKEN can read the repository and its issues and push.
+
+        Pushing is checked because the built-in OpenPullRequest step uses the
+        same token; without it a run fails only after the agent has finished.
+        Permission to open pull requests cannot be checked without opening one.
+        """
+        async with self._client() as client:
+            repo = await client.get(f"/repos/{self._repo}")
+            issues = await client.get(
+                f"/repos/{self._repo}/issues", params={"per_page": "1"}
+            )
+        self._raise_for_access(repo, "see")
+        self._raise_for_access(issues, "read the issues of")
+        async with httpx.AsyncClient(
+            base_url=GIT_URL,
+            auth=httpx.BasicAuth("x-access-token", self._token),
+            transport=self._transport,
+        ) as client:
+            # The ref advertisement git fetches before a push; GitHub answers
+            # it only for credentials that may push.
+            push = await client.get(
+                f"/{self._repo}.git/info/refs",
+                params={"service": "git-receive-pack"},
+            )
+        self._raise_for_access(push, "push to")
+
+    def _raise_for_access(self, response: httpx.Response, action: str) -> None:
+        if response.status_code == httpx.codes.UNAUTHORIZED:
+            raise TriggerCheckError(
+                "GitHub rejected GITHUB_TOKEN; it may be expired or revoked"
+            )
+        # GitHub answers 404 rather than 403 for private repositories the
+        # token cannot see.
+        if response.status_code in (httpx.codes.FORBIDDEN, httpx.codes.NOT_FOUND):
+            raise TriggerCheckError(
+                f"GITHUB_TOKEN cannot {action} {self._repo} "
+                f"(HTTP {response.status_code}). It needs Contents read/write, "
+                "Issues read and Pull requests read/write on the repository."
+            )
+        response.raise_for_status()
 
     async def poll(self) -> list[WorkItem]:
         async with self._client() as client:

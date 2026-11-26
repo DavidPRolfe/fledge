@@ -29,6 +29,9 @@ class FakeTrigger:
     comments: dict[str, list[Comment]] = field(default_factory=dict)
     guidance_calls: list[tuple[str, datetime]] = field(default_factory=list)
 
+    async def check(self) -> None:
+        pass
+
     async def poll(self) -> list[WorkItem]:
         return self.items
 

@@ -30,8 +30,19 @@ class TurnResult:
     final_message: str
 
 
+class TriggerCheckError(RuntimeError):
+    """The trigger cannot do its job, e.g. its credentials lack a permission."""
+
+
 @runtime_checkable
 class Trigger(Protocol):
+    async def check(self) -> None:
+        """Raise TriggerCheckError if the trigger or its workflow cannot work.
+
+        Called once at startup, before any polling.
+        """
+        ...
+
     async def poll(self) -> list[WorkItem]:
         """Work that currently qualifies. Returning an item again is harmless."""
         ...

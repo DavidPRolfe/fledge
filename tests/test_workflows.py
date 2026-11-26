@@ -22,6 +22,9 @@ tickets = Workflow(name="tickets", trigger=StartsFake(), steps=[Noop("a"), Noop(
 """
 SHARED = """\
 class FakeTrigger:
+    async def check(self):
+        pass
+
     async def poll(self):
         return []
 

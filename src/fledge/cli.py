@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import uvicorn
 
+from fledge.core import TriggerCheckError
 from fledge.db import migrate
 from fledge.executor import execute_from_env
 from fledge.orchestrator import Orchestrator
@@ -32,6 +33,11 @@ async def _serve(config: Settings, database_url: str, host: str, port: int) -> N
     snapshot = read_snapshot(config.workflows_dir)
     workflows = load_workflows(snapshot.files)
     bindings = start_triggers(snapshot.hash, workflows)
+    for name, binding in bindings.items():
+        try:
+            await binding.trigger.check()
+        except TriggerCheckError as err:
+            raise SystemExit(f"workflow {name!r}: {err}") from err
     logger.info(
         "loaded workflows %s from %s (snapshot %s)",
         ", ".join(sorted(workflows)),
