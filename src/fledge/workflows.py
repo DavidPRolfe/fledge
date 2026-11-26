@@ -8,6 +8,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import re
 import sys
 import tempfile
 import uuid
@@ -18,6 +19,20 @@ from pathlib import Path
 
 from fledge.core import Trigger, Workflow
 from fledge.store import WorkflowRef
+
+_GITHUB_REPO = re.compile(r"[\w.-]+/[\w.-]+")
+
+_GITHUB_WORKFLOW = """\
+from fledge.builtin.triggers.github_issues import GitHubIssues
+from fledge.builtin.workflows.ticket_to_pr import STEPS
+from fledge.core import Workflow
+
+{name} = Workflow(
+    name={name!r},
+    trigger=GitHubIssues(repo={repo!r}, label={label!r}),
+    steps=STEPS,
+)
+"""
 
 
 @dataclass(frozen=True)
@@ -96,3 +111,22 @@ def start_triggers(
         )
         for name, workflow in workflows.items()
     }
+
+
+def write_github_workflow(directory: Path, name: str, repo: str, label: str) -> Path:
+    """Write the built-in ticket_to_pr steps fed by labelled issues in `repo`.
+
+    Refuses to overwrite an existing file.
+    """
+    if not name.isidentifier():
+        raise ValueError(f"name must be a Python identifier, got {name!r}")
+    if not _GITHUB_REPO.fullmatch(repo):
+        raise ValueError(f"repo must be 'owner/name', got {repo!r}")
+    # GitHub takes the labels filter as a comma-separated list.
+    if not label or "," in label:
+        raise ValueError(f"label must be non-empty without commas, got {label!r}")
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}.py"
+    with path.open("x") as file:
+        file.write(_GITHUB_WORKFLOW.format(name=name, repo=repo, label=label))
+    return path

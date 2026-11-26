@@ -3,9 +3,15 @@ from pathlib import Path
 import pytest
 
 from fledge.builtin.triggers.github_issues import GitHubIssues, MissingTokenError
+from fledge.builtin.workflows.ticket_to_pr import STEPS
 from fledge.core import Trigger
 from fledge.store import WorkflowRef
-from fledge.workflows import load_workflows, read_snapshot, start_triggers
+from fledge.workflows import (
+    load_workflows,
+    read_snapshot,
+    start_triggers,
+    write_github_workflow,
+)
 
 TICKETS = """\
 from fledge.core import Workflow
@@ -132,3 +138,39 @@ def test_github_issues_reads_the_token_only_when_started() -> None:
 
     with pytest.raises(MissingTokenError):
         spec.start()
+
+
+def test_written_github_workflow_loads_with_its_trigger(tmp_path: Path) -> None:
+    path = write_github_workflow(tmp_path / "workflows", "tickets", "acme/api", "ai")
+
+    workflows = load_workflows(read_snapshot(path.parent).files)
+
+    workflow = workflows["tickets"]
+    assert workflow.trigger == GitHubIssues(repo="acme/api", label="ai")
+    assert [step.name for step in workflow.steps] == [step.name for step in STEPS]
+
+
+def test_write_github_workflow_does_not_overwrite(tmp_path: Path) -> None:
+    write_github_workflow(tmp_path, "tickets", "acme/api", "fledge")
+
+    with pytest.raises(FileExistsError):
+        write_github_workflow(tmp_path, "tickets", "acme/other", "fledge")
+
+
+@pytest.mark.parametrize(
+    ("name", "repo", "label", "error"),
+    [
+        ("my-tickets", "acme/api", "fledge", "name"),
+        ("tickets", "acme", "fledge", "repo"),
+        ("tickets", "acme/api/extra", "fledge", "repo"),
+        ("tickets", "acme/api", "a,b", "label"),
+        ("tickets", "acme/api", "", "label"),
+    ],
+)
+def test_write_github_workflow_rejects_bad_arguments(
+    tmp_path: Path, name: str, repo: str, label: str, error: str
+) -> None:
+    with pytest.raises(ValueError, match=f"^{error} "):
+        write_github_workflow(tmp_path, name, repo, label)
+
+    assert not any(tmp_path.iterdir())

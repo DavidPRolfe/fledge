@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 
 import httpx
 import uvicorn
@@ -15,7 +16,12 @@ from fledge.runner.docker import DockerRunner
 from fledge.settings import Settings
 from fledge.store import Store
 from fledge.web.app import create_app
-from fledge.workflows import load_workflows, read_snapshot, start_triggers
+from fledge.workflows import (
+    load_workflows,
+    read_snapshot,
+    start_triggers,
+    write_github_workflow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +82,14 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="0.0.0.0")  # noqa: S104 - runs in a container; compose publishes it on localhost only
     serve.add_argument("--port", type=int, default=8000)
 
+    init = commands.add_parser(
+        "init", help="write a workflow that turns labelled GitHub issues into PRs"
+    )
+    init.add_argument("--repo", required=True, help="GitHub repository, owner/name")
+    init.add_argument("--label", default="fledge", help="issue label to watch")
+    init.add_argument("--name", default="tickets", help="workflow name")
+    init.add_argument("--dir", type=Path, default=Path("workflows"))
+
     commands.add_parser("migrate", help="apply database migrations")
     commands.add_parser("step-exec", help="run one step (inside a step container)")
 
@@ -96,6 +110,14 @@ def main() -> None:
             database_url = os.environ[DATABASE_URL_ENV]
             migrate(database_url)
             asyncio.run(_serve(Settings(), database_url, args.host, args.port))
+        case "init":
+            try:
+                path = write_github_workflow(args.dir, args.name, args.repo, args.label)
+            except FileExistsError as err:
+                raise SystemExit(f"{err.filename} already exists") from err
+            except ValueError as err:
+                raise SystemExit(str(err)) from err
+            sys.stdout.write(f"wrote {path}\n")
         case "migrate":
             migrate(os.environ[DATABASE_URL_ENV])
         case "step-exec":

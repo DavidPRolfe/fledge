@@ -30,7 +30,15 @@ branches and open pull requests on the target repository, and credentials for
 Claude Code: either an Anthropic API key or a Claude subscription token.
 
 1. Write a workflow in `workflows/` (any `.py` file; the directory is
-   git-ignored), pointing the trigger at your repository and label:
+   git-ignored), pointing the trigger at your repository and label. This
+   command writes the simplest one, below:
+
+   ```bash
+   uv run fledge init --repo owner/name
+   ```
+
+   `--label` (default `fledge`) and `--name` (default `tickets`) change the
+   label and workflow name. The file it writes is:
 
    ```python
    # workflows/tickets.py
