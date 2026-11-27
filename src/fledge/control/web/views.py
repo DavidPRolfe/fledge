@@ -1,4 +1,7 @@
-"""HTML for the web view, built with htpy and made live with htmx."""
+"""HTML for the web view, built with htpy and made live with htmx.
+
+Styles live in static/fledge.css.
+"""
 
 import json
 from collections.abc import Sequence
@@ -10,21 +13,29 @@ from htpy import (
     a,
     body,
     button,
+    dd,
     div,
+    dl,
+    dt,
     form,
     fragment,
     h1,
     h2,
     head,
+    header,
     html,
+    img,
     li,
+    link,
+    main,
     meta,
+    nav,
     option,
     p,
     script,
+    section,
     select,
     span,
-    style,
     table,
     tbody,
     td,
@@ -36,9 +47,9 @@ from htpy import (
     ul,
 )
 from htpy import input as input_
-from markupsafe import Markup
 from pydantic import JsonValue
 
+from fledge.control.store import CallStatus, RunStatus
 from fledge.control.web.schemas import (
     CallOut,
     EventOut,
@@ -71,38 +82,6 @@ REFRESH_EVENT = "refresh"
 _POLL_SECONDS = 2
 _ACTIVE_STATUSES = ("pending", "running")
 
-_CSS = Markup("""
-  body {
-    font-family: system-ui, sans-serif;
-    max-width: 960px;
-    margin: 0 auto;
-    padding: 1rem;
-    color: #222;
-    background: #fff;
-    line-height: 1.4;
-  }
-  a { color: #0645ad; }
-  h1 { font-size: 1.4rem; }
-  h2 { font-size: 1.1rem; margin-top: 1.5rem; }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { text-align: left; padding: 0.3rem 0.5rem; border-bottom: 1px solid #ddd; vertical-align: top; }
-  form { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-start; }
-  input, select, textarea, button { font: inherit; padding: 0.3rem 0.5rem; }
-  textarea { flex: 1 1 20rem; min-height: 4rem; }
-  .status { font-weight: bold; }
-  .error { color: #b00020; white-space: pre-wrap; }
-  .muted { color: #666; }
-  #events {
-    background: #f6f6f6;
-    padding: 0.5rem;
-    max-height: 30rem;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    font-family: ui-monospace, monospace;
-    font-size: 0.85rem;
-  }
-""")
-
 
 def _result_text(result: JsonValue) -> str:
     if result is None:
@@ -112,14 +91,37 @@ def _result_text(result: JsonValue) -> str:
     return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
 
-def _format_time(value: datetime) -> str:
-    return value.isoformat(sep=" ", timespec="seconds")
-
-
 def _link_or_text(value: JsonValue) -> Node:
     if isinstance(value, str) and value.lower().startswith(("http://", "https://")):
         return a(href=value)[value]
     return _result_text(value)
+
+
+def _full_time(value: datetime) -> str:
+    return value.isoformat(sep=" ", timespec="seconds")
+
+
+def _time(value: datetime | None) -> Node:
+    """A short timestamp for tables, with the full one on hover."""
+    if value is None:
+        return "-"
+    return span(title=_full_time(value))[value.strftime("%m-%d %H:%M:%S")]
+
+
+def _duration(start: datetime | None, end: datetime | None) -> str:
+    if start is None or end is None:
+        return "-"
+    minutes, seconds = divmod(int((end - start).total_seconds()), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {seconds:02d}s"
+    return f"{seconds}s"
+
+
+def _pill(status: RunStatus | CallStatus) -> Element:
+    return span(f".pill.pill-{status}")[status]
 
 
 def _page(page_title: str, content: Node) -> Element:
@@ -129,40 +131,64 @@ def _page(page_title: str, content: Node) -> Element:
             meta(name="viewport", content="width=device-width, initial-scale=1"),
             meta(name="htmx-config", content=_HTMX_CONFIG),
             title[page_title],
-            style[_CSS],
+            link(rel="stylesheet", href="/static/fledge.css"),
             script(src=HTMX_URL, integrity=HTMX_INTEGRITY, crossorigin="anonymous"),
         ],
-        body[p[a(href="/")["fledge"]], content],
+        body[
+            header(".topbar")[
+                div[
+                    a(".brand", href="/")[
+                        img(src="/static/logo.svg", alt=""), "fledge"
+                    ],
+                    nav[a(href="/")["Runs"]],
+                ]
+            ],
+            main[content],
+        ],
     ]
 
 
 def index_page(runs: Sequence[RunOut], workflows: Sequence[str]) -> Element:
+    rows = [
+        tr[
+            td[a(href=f"/runs/{run.id}")[run.title]],
+            td[_pill(run.status)],
+            td(".mono")[run.workflow],
+            td(".mono")[run.origin],
+            td(".mono")[run.external_id],
+            td(".mono")[_time(run.created_at)],
+            td(".mono")[_duration(run.started_at, run.finished_at)],
+        ]
+        for run in runs
+    ]
     return _page(
         "fledge",
         [
-            h1["Runs"],
-            h2["Launch"],
-            form("#launch", hx_post="/runs", hx_target="#launch-error")[
-                select(name="workflow", required=True)[
-                    (option(value=name)[name] for name in workflows)
+            div(".page-head")[
+                h1["Runs ", span(".muted")[str(len(runs))]],
+                form("#launch", hx_post="/runs", hx_target="#launch-error")[
+                    select(name="workflow", required=True)[
+                        (option(value=name)[name] for name in workflows)
+                    ],
+                    input_(name="ref", placeholder="ticket ref", required=True),
+                    button(type="submit")["Launch run"],
                 ],
-                input_(name="ref", placeholder="ticket ref", required=True),
-                button(type="submit")["Launch"],
             ],
             p("#launch-error.error"),
-            table[
-                thead[tr[th["Title"], th["Workflow"], th["Status"], th["Created"]]],
-                tbody[
-                    [
+            div(".card.flush")[
+                table[
+                    thead[
                         tr[
-                            td[a(href=f"/runs/{run.id}")[run.title]],
-                            td[run.workflow],
-                            td(".status")[run.status],
-                            td[_format_time(run.created_at)],
+                            th["Title"],
+                            th["Status"],
+                            th["Workflow"],
+                            th["Origin"],
+                            th["Ref"],
+                            th["Created"],
+                            th["Duration"],
                         ]
-                        for run in runs
-                    ]
-                    or tr[td(".muted", colspan="4")["No runs yet."]]
+                    ],
+                    tbody[rows or tr[td(".muted", colspan="7")["No runs yet."]]],
                 ],
             ],
         ],
@@ -179,53 +205,82 @@ def _run_status(run: RunOut, after: int) -> Element:
     trigger = f"{REFRESH_EVENT} from:body"
     if active:
         trigger = f"every {_POLL_SECONDS}s, {trigger}"
+    facts: dict[str, Node] = {
+        "workflow": run.workflow,
+        "origin": run.origin,
+        "ref": run.external_id,
+        "created": _time(run.created_at),
+        "started": _time(run.started_at),
+        "finished": _time(run.finished_at),
+        "duration": _duration(run.started_at, run.finished_at),
+    }
     return div(
-        "#run-status",
+        "#run-status.card",
         hx_get=f"/runs/{run.id}/live?after={after}",
         hx_trigger=trigger,
         hx_swap="outerHTML",
         hx_sync="this:drop",
     )[
-        p[
-            "Status: ",
-            span("#status.status")[run.status],
-            " ",
-            span(
-                "#cancel-requested.muted",
-                hidden=not (active and run.cancel_requested),
-            )["(cancel requested)"],
+        dl(".facts")[
+            div[
+                dt["status"],
+                dd[
+                    span(f"#status.pill.pill-{run.status}")[run.status],
+                    " ",
+                    span(
+                        "#cancel-requested.muted",
+                        hidden=not (active and run.cancel_requested),
+                    )["(cancel requested)"],
+                ],
+            ],
+            (div[dt[label], dd(".mono")[value]] for label, value in facts.items()),
+            div[dt["ticket"], dd[_link_or_text(run.url)]],
+            div[
+                button(
+                    class_="danger",
+                    hx_post=f"/runs/{run.id}/cancel",
+                    hx_target="#cancel-message",
+                    # Without this it inherits outerHTML from #run-status and
+                    # the empty success response would delete the message.
+                    hx_swap="innerHTML",
+                    id="cancel",
+                    type="button",
+                    hidden=not active,
+                )["Cancel run"],
+            ],
         ],
         p("#run-error.error")[run.error or ""],
-        p[
-            button(
-                hx_post=f"/runs/{run.id}/cancel",
-                hx_target="#cancel-message",
-                # Without this it inherits outerHTML from #run-status and the
-                # empty success response would delete the message element.
-                hx_swap="innerHTML",
-                id="cancel",
-                type="button",
-                hidden=not active,
-            )["Cancel run"],
-        ],
     ]
 
 
 def _calls_table(calls: Sequence[CallOut], *, oob: bool) -> Element:
+    rows = [
+        tr[
+            td(".mono.muted")[str(call.position)],
+            td(".mono")[call.name],
+            td[call.kind],
+            td[_pill(call.status)],
+            td[_link_or_text(call.result)],
+            td(".error")[call.error or ""],
+            td(".mono")[_time(call.started_at)],
+            td(".mono")[_duration(call.started_at, call.finished_at)],
+        ]
+        for call in calls
+    ]
     return table("#calls", hx_swap_oob="true" if oob else False)[
-        thead[tr[th["Call"], th["Kind"], th["Status"], th["Result"], th["Error"]]],
-        tbody[
-            (
-                tr[
-                    td[call.name],
-                    td[call.kind],
-                    td(".status")[call.status],
-                    td[_link_or_text(call.result)],
-                    td(".error")[call.error or ""],
-                ]
-                for call in calls
-            )
+        thead[
+            tr[
+                th["#"],
+                th["Call"],
+                th["Kind"],
+                th["Status"],
+                th["Result"],
+                th["Error"],
+                th["Started"],
+                th["Duration"],
+            ]
         ],
+        tbody[rows or tr[td(".muted", colspan="8")["No calls yet."]]],
     ]
 
 
@@ -233,8 +288,11 @@ def _guidance_list(guidance: Sequence[GuidanceOut], *, oob: bool) -> Element:
     return ul("#guidance", hx_swap_oob="true" if oob else False)[
         (
             li[
-                f"{item.author} ({item.source}, "
-                f"{'delivered' if item.delivered else 'not delivered'}): {item.body}"
+                span(".mono.muted")[f"{item.author}/{item.source}"],
+                " ",
+                item.body,
+                " ",
+                span(".muted")["delivered" if item.delivered else "not delivered"],
             ]
             for item in guidance
         )
@@ -243,7 +301,7 @@ def _guidance_list(guidance: Sequence[GuidanceOut], *, oob: bool) -> Element:
 
 def _event_lines(events: Sequence[EventOut]) -> list[Element]:
     return [
-        div[f"{_format_time(event.at)} [{event.kind}] {event.message}"]
+        div[f"{_full_time(event.at)} [{event.kind}] {event.message}"]
         for event in events
     ]
 
@@ -258,32 +316,40 @@ def run_page(detail: RunDetail, events: Sequence[EventOut]) -> Element:
         f"{run.title} - fledge",
         [
             h1[run.title],
-            p[
-                "Ticket: ",
-                _link_or_text(run.url),
-                " ",
-                span(".muted")[f"({run.workflow})"],
-            ],
             _run_status(run, _cursor(events, 0)),
             p("#cancel-message.error"),
             h2["Calls"],
-            _calls_table(detail.calls, oob=False),
-            h2["Guidance"],
-            _guidance_list(detail.guidance, oob=False),
-            form(
-                "#guidance-form",
-                {"hx-on::after-request": "if (event.detail.successful) this.reset()"},
-                hx_post=f"/runs/{run.id}/guidance",
-                hx_target="#guidance-error",
-            )[
-                textarea(
-                    name="body", placeholder="Guidance for the agent", required=True
-                ),
-                button(type="submit")["Send guidance"],
+            div(".card.flush")[_calls_table(detail.calls, oob=False)],
+            div(".split")[
+                section[
+                    h2["Guidance"],
+                    div(".card")[
+                        _guidance_list(detail.guidance, oob=False),
+                        form(
+                            "#guidance-form",
+                            {
+                                "hx-on::after-request": (
+                                    "if (event.detail.successful) this.reset()"
+                                )
+                            },
+                            hx_post=f"/runs/{run.id}/guidance",
+                            hx_target="#guidance-error",
+                        )[
+                            textarea(
+                                name="body",
+                                placeholder="Guidance for the agent",
+                                required=True,
+                            ),
+                            button(type="submit")["Send guidance"],
+                        ],
+                        p("#guidance-error.error"),
+                    ],
+                ],
+                section[
+                    h2["Events"],
+                    div("#events.card.log")[_event_lines(events)],
+                ],
             ],
-            p("#guidance-error.error"),
-            h2["Events"],
-            div("#events")[_event_lines(events)],
         ],
     )
 

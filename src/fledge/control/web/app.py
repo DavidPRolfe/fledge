@@ -1,6 +1,8 @@
 from collections.abc import Mapping
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from fledge.control.snapshots import TriggerBinding
 from fledge.control.store import Store
@@ -14,4 +16,7 @@ def create_app(store: Store, workflows: Mapping[str, TriggerBinding]) -> FastAPI
     app.include_router(public_routes(store, workflows))
     app.include_router(internal_routes(store))
     app.include_router(page_routes(store, workflows))
+    app.mount(
+        "/static", StaticFiles(directory=Path(__file__).parent / "static"), "static"
+    )
     return app

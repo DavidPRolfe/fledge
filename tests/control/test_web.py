@@ -552,3 +552,16 @@ async def test_live_fragment_appends_new_events_and_polls_while_active(
     live = (await client.get(f"/runs/{run.id}/live?after={second.id}")).text
     assert "every 2s" not in live
     assert 'hx-trigger="refresh from:body"' in live
+
+
+@pytest.mark.parametrize(
+    ("path", "content_type"),
+    [("/static/fledge.css", "text/css"), ("/static/logo.svg", "image/svg+xml")],
+)
+async def test_pages_link_static_files_that_are_served(
+    client: httpx.AsyncClient, path: str, content_type: str
+) -> None:
+    assert path in (await client.get("/")).text
+    response = await client.get(path)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(content_type)
