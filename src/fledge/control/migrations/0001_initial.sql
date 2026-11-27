@@ -1,6 +1,12 @@
+CREATE TABLE workflow_snapshots (
+    hash text PRIMARY KEY,
+    -- Source text by path relative to the workflows directory.
+    files jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE runs (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    trigger text NOT NULL,
     external_id text NOT NULL,
     origin text NOT NULL CHECK (origin IN ('poll', 'manual')),
     workflow text NOT NULL,
@@ -15,10 +21,11 @@ CREATE TABLE runs (
     error text,
     created_at timestamptz NOT NULL DEFAULT now(),
     started_at timestamptz,
-    finished_at timestamptz
+    finished_at timestamptz,
+    snapshot_hash text REFERENCES workflow_snapshots (hash)
 );
 
-CREATE INDEX runs_trigger_external_id ON runs (trigger, external_id);
+CREATE INDEX runs_workflow_external_id ON runs (workflow, external_id);
 CREATE INDEX runs_status ON runs (status);
 
 CREATE TABLE step_runs (
@@ -29,13 +36,19 @@ CREATE TABLE step_runs (
     status text NOT NULL DEFAULT 'running' CHECK (
         status IN ('running', 'succeeded', 'failed', 'cancelled')
     ),
-    output jsonb NOT NULL DEFAULT '{}',
     error text,
     token_hash text NOT NULL,
     started_at timestamptz NOT NULL DEFAULT now(),
     finished_at timestamptz,
+    kind text NOT NULL CHECK (kind IN ('step', 'wait')),
+    function text NOT NULL,
+    args jsonb NOT NULL DEFAULT '{}',
+    result jsonb,
     UNIQUE (run_id, step_index)
 );
+
+-- The orchestrator counts running steps against the concurrency limit every tick.
+CREATE INDEX step_runs_running ON step_runs (kind) WHERE status = 'running';
 
 CREATE TABLE events (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
