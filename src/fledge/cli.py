@@ -1,71 +1,15 @@
 import argparse
-import asyncio
 import logging
 import os
 import sys
 from pathlib import Path
 
 import httpx
-import uvicorn
 
-from fledge.control.db import migrate
-from fledge.control.orchestrator import Orchestrator
-from fledge.control.poller import Poller
-from fledge.control.runner.docker import DockerRunner
-from fledge.control.settings import Settings
-from fledge.control.snapshots import SnapshotLoader, start_triggers
-from fledge.control.store import Store
-from fledge.control.web.app import create_app
 from fledge.executor import execute_from_env
 from fledge.scaffold import write_github_workflow
-from fledge.triggers import TriggerCheckError
-from fledge.workflows import load_workflows, read_snapshot
-
-logger = logging.getLogger(__name__)
 
 DATABASE_URL_ENV = "DATABASE_URL"
-
-
-async def _serve(config: Settings, database_url: str, host: str, port: int) -> None:
-    snapshot = read_snapshot(config.workflows_dir)
-    loaded = load_workflows(snapshot.files)
-    bindings = start_triggers(snapshot.hash, loaded.workflows)
-    for name, binding in bindings.items():
-        try:
-            await binding.trigger.check()
-        except TriggerCheckError as err:
-            raise SystemExit(f"workflow {name!r}: {err}") from err
-    logger.info(
-        "loaded workflows %s from %s (snapshot %s)",
-        ", ".join(sorted(loaded.workflows)),
-        config.workflows_dir,
-        snapshot.hash[:12],
-    )
-    async with Store(database_url) as store:
-        await store.save_snapshot(snapshot.hash, snapshot.files)
-        app = create_app(store, bindings)
-        loader = SnapshotLoader(store)
-        orchestrator = Orchestrator(
-            store,
-            DockerRunner(config.docker_network, source_dir=config.step_source_dir),
-            config,
-            loader.workflow,
-        )
-        poller = Poller(store, bindings, config)
-        server = uvicorn.Server(
-            uvicorn.Config(app, host=host, port=port, log_config=None)
-        )
-        # A loop that dies takes the whole process down with it: a control
-        # plane that serves the web view but no longer schedules is worse
-        # than one that visibly crashed.
-        async with asyncio.TaskGroup() as group:
-            loops = [
-                group.create_task(orchestrator.run_forever()),
-                group.create_task(poller.run_forever()),
-            ]
-            await server.serve()
-            for loop in loops:
-                loop.cancel()
 
 
 def _submit(url: str, workflow: str, refs: list[str]) -> None:
@@ -112,9 +56,9 @@ def main() -> None:
     )
     match args.command:
         case "serve":
-            database_url = os.environ[DATABASE_URL_ENV]
-            migrate(database_url)
-            asyncio.run(_serve(Settings(), database_url, args.host, args.port))
+            from fledge.control.serve import serve  # noqa: PLC0415 - step containers run this CLI and must not load the control plane
+
+            serve(os.environ[DATABASE_URL_ENV], args.host, args.port)
         case "init":
             try:
                 path = write_github_workflow(args.dir, args.name, args.repo, args.label)
@@ -124,6 +68,8 @@ def main() -> None:
                 raise SystemExit(str(err)) from err
             sys.stdout.write(f"wrote {path}\n")
         case "migrate":
+            from fledge.control.db import migrate  # noqa: PLC0415 - step containers run this CLI and must not load the control plane
+
             migrate(os.environ[DATABASE_URL_ENV])
         case "step-exec":
             sys.exit(execute_from_env())

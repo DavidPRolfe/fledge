@@ -67,7 +67,7 @@ Runtime dependencies: `fastapi`, `uvicorn`, `jinja2`, `psycopg`, `pydantic`,
 Shipped extensions:
 
 - Trigger: `GitHubIssues` (open issues in one repo carrying a configured label).
-- Steps: `clone_repo` (`fledge.steps`) and `mark_ready` (`fledge.github`).
+- Steps: `clone_repo` (`fledge.git`) and `mark_ready` (`fledge.github`).
 - Checks: `command` (`fledge.checks`), `Agent.approves`, and the waits
   `checks_green` and `merged` (`fledge.github`).
 - Pull request calls: `open_pull_request` and `push` (`fledge.github`), each an
@@ -380,11 +380,11 @@ Runs in the control plane, so its methods are async.
 ```python
 @dataclass(frozen=True)
 class WorkItem:
-    external_id: str   # stable id within this trigger, e.g. the issue number
+    external_id: str  # stable id within this trigger, e.g. the issue number
     title: str
     body: str
-    url: str           # link back to the ticket
-    repo_url: str      # repository to clone and open the pull request against
+    url: str  # link back to the ticket
+    repo_url: str  # repository to clone and open the pull request against
 
 
 @dataclass(frozen=True)
@@ -435,7 +435,9 @@ manual trigger.
 ### Workflow
 
 ```python
-def workflow(*, trigger: TriggerSpec) -> Callable[[Callable[[Run], None]], Workflow]: ...
+def workflow(
+    *, trigger: TriggerSpec
+) -> Callable[[Callable[[Run], None]], Workflow]: ...
 
 
 @dataclass(frozen=True)
@@ -492,7 +494,7 @@ def migrate_and_test(ctx: StepContext, repo: Repo) -> bool: ...
 class StepContext(Protocol):
     run_id: UUID
     work: WorkItem
-    workspace: Path                  # shared by all steps of the run
+    workspace: Path  # shared by all steps of the run
 
     def log(self, message: str) -> None: ...
     def agent_event(self, message: str) -> None: ...
@@ -554,8 +556,8 @@ Runs inside the step container, next to the agent CLI it wraps.
 class Turn:
     prompt: str
     workdir: Path
-    state_dir: Path                  # session state; outlives the container
-    session_id: str | None           # None on an agent's first turn in a run
+    state_dir: Path  # session state; outlives the container
+    session_id: str | None  # None on an agent's first turn in a run
     output_schema: Mapping[str, JsonValue] | None = None
 
 
@@ -563,7 +565,7 @@ class Turn:
 class TurnResult:
     session_id: str
     final_message: str
-    structured: JsonValue = None     # the answer, when there was a schema
+    structured: JsonValue = None  # the answer, when there was a schema
 
 
 class Harness(Protocol):
@@ -703,7 +705,7 @@ are on. The runner interface is the whole difference:
 ```python
 class Runner(Protocol):
     async def create_workspace(self, run_id: UUID) -> None: ...
-    async def start_step(self, spec: StepSpec) -> None: ...   # with spec.services
+    async def start_step(self, spec: StepSpec) -> None: ...  # with spec.services
     async def step_state(self, step_run_id: UUID) -> ContainerState: ...
     async def stop_step(self, step_run_id: UUID) -> None: ...  # and its services
     async def delete_workspace(self, run_id: UUID) -> None: ...

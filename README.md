@@ -64,6 +64,7 @@ You need:
    """
 
    from fledge import Agent, Run, until, workflow
+   from fledge.git import clone_repo
    from fledge.github import (
        GitHubIssues,
        checks_green,
@@ -73,7 +74,6 @@ You need:
        push,
    )
    from fledge.harnesses import ClaudeCode
-   from fledge.steps import clone_repo
 
    IMPLEMENT = """\
    Resolve this ticket by changing the repository in the current working directory.
@@ -203,6 +203,7 @@ opened and again after each round of human review.
 ```python
 # workflows/reviewed.py
 from fledge import Agent, Repo, Run, Sandbox, Service, until, workflow
+from fledge.git import clone_repo
 from fledge.github import (
     GitHubIssues,
     checks_green,
@@ -212,7 +213,6 @@ from fledge.github import (
     push,
 )
 from fledge.harnesses import ClaudeCode, Codex
-from fledge.steps import clone_repo
 
 IMPLEMENT = """\
 Resolve this ticket: {work.title}
@@ -367,7 +367,7 @@ the change by itself.
 | `src/fledge/triggers.py`, `harnesses/base.py` | The interfaces triggers and harnesses implement |
 | `src/fledge/engine.py` | Replaying workflow functions; `@step` and `@workflow` |
 | `src/fledge/checks.py`, `agents.py` | Checks, waits, `until` and the built-in `command` check; agents |
-| `src/fledge/steps.py`, `github/`, `harnesses/` | Built-in steps, the GitHub trigger and pull requests, Claude Code and Codex |
+| `src/fledge/git.py`, `github/`, `harnesses/` | Running git and `clone_repo`, the GitHub trigger and pull requests, Claude Code and Codex |
 | `src/fledge/workflows.py` | Loading and snapshotting the workflows directory |
 | `src/fledge/scaffold.py` | The workflow `fledge init` writes |
 | `src/fledge/executor.py`, `wire.py` | What runs inside a step container, and its contract with the control plane |

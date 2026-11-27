@@ -7,9 +7,8 @@ import pytest
 
 from fledge.agents import Agent
 from fledge.core import WorkItem
-from fledge.git import GitError
+from fledge.git import GitError, clone_repo
 from fledge.harnesses.base import Harness
-from fledge.steps import clone_repo
 
 GITHUB_CREDENTIAL = "ghp_test_credential"
 

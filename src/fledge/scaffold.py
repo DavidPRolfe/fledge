@@ -19,6 +19,7 @@ pauses a run by raising one.
 """
 
 from fledge import Agent, Run, until, workflow
+from fledge.git import clone_repo
 from fledge.github import (
     GitHubIssues,
     checks_green,
@@ -28,7 +29,6 @@ from fledge.github import (
     push,
 )
 from fledge.harnesses import ClaudeCode
-from fledge.steps import clone_repo
 
 IMPLEMENT = """\\
 Resolve this ticket by changing the repository in the current working directory.
