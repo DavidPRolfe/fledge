@@ -1,3 +1,4 @@
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -5,10 +6,9 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from fledge import engine
-from fledge.agents import Agent
 from fledge.checks import (
     Feedback,
     FeedbackItem,
@@ -19,12 +19,14 @@ from fledge.checks import (
     Verdict,
     WaitContext,
     check,
+    command,
     guidance_verdict,
     render_feedback,
     until,
     wait,
 )
-from fledge.core import Run, Sandbox, StepContext, Workflow, WorkItem
+from fledge.control.store import JournalRow
+from fledge.core import Repo, Run, Sandbox, StepContext, WorkItem
 from fledge.engine import (
     Cancelled,
     Failed,
@@ -32,11 +34,12 @@ from fledge.engine import (
     PendingCall,
     Succeeded,
     Suspended,
+    Workflow,
     step,
     workflow,
 )
 from fledge.github import GitHubIssues
-from fledge.store import StepRun
+from fledge.harnesses.base import Harness
 
 START = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 WORK = WorkItem(
@@ -59,8 +62,8 @@ def finished_at(position: int) -> datetime:
     return START + timedelta(minutes=position + 1)
 
 
-def entry(run: Run, call: PendingCall, result: JsonValue) -> StepRun:
-    return StepRun(
+def entry(run: Run, call: PendingCall, result: JsonValue) -> JournalRow:
+    return JournalRow(
         id=uuid4(),
         run_id=run.id,
         step_index=call.position,
@@ -82,7 +85,7 @@ def drive(
 ) -> tuple[Outcome, list[PendingCall]]:
     """Replay `flow`, recording each result for the call it suspends on."""
     run = Run(uuid4(), WORK)
-    journal: list[StepRun] = []
+    journal: list[JournalRow] = []
     calls: list[PendingCall] = []
     for result in results:
         outcome = engine.replay(flow, run, START, journal)
@@ -107,8 +110,8 @@ class FakeContext:
     def claim_guidance(self) -> list[str]:
         return []
 
-    def agent(self, name: str) -> Agent:
-        raise KeyError(name)
+    def harness(self, agent: str) -> Harness:
+        raise KeyError(agent)
 
 
 @check
@@ -277,7 +280,7 @@ def test_within_runs_the_check_with_another_sandbox() -> None:
     assert outcome.call.function == "test_checks:file_exists"
 
 
-def suspended_wait(flow: Workflow, journal: list[StepRun], run: Run) -> PendingCall:
+def suspended_wait(flow: Workflow, journal: list[JournalRow], run: Run) -> PendingCall:
     outcome = engine.replay(flow, run, START, journal)
     assert isinstance(outcome, Suspended)
     assert outcome.call.kind == "wait"
@@ -331,7 +334,7 @@ def test_since_is_the_loop_start_then_when_feedback_was_recorded(
             fix(attempt + 1)
 
     run = Run(uuid4(), WORK)
-    journal: list[StepRun] = []
+    journal: list[JournalRow] = []
     outcome = engine.replay(flow, run, START, journal)
     assert isinstance(outcome, Suspended)
     journal.append(entry(run, outcome.call, 0))
@@ -389,3 +392,75 @@ def test_render_feedback_names_each_author() -> None:
 
     assert text.startswith("Address these findings")
     assert "From ci:\ntests fail\n\nFrom bob:\nrename" in text
+
+
+def repo_at(path: Path) -> Repo:
+    return Repo("https://github.com/acme/api", path, "fledge/x", "main")
+
+
+def repo_json(path: Path) -> dict[str, JsonValue]:
+    return {
+        "url": "https://github.com/acme/api",
+        "path": str(path),
+        "branch": "fledge/x",
+        "base": "main",
+    }
+
+
+def python(code: str) -> list[JsonValue]:
+    # Unbuffered, so stdout and stderr interleave in the order they are written.
+    return [sys.executable, "-u", "-c", code]
+
+
+def test_command_passes_in_the_repository(tmp_path: Path) -> None:
+    (tmp_path / "marker").write_text("")
+    argv = python(
+        "import pathlib, sys; sys.exit(0 if pathlib.Path('marker').exists() else 3)"
+    )
+
+    result = command.step.execute(
+        FakeContext(tmp_path), {"argv": argv, "repo": repo_json(tmp_path)}
+    )
+
+    assert result == {"kind": "passed"}
+
+
+def test_command_failure_is_feedback_with_the_tail_of_the_output(
+    tmp_path: Path,
+) -> None:
+    argv = python(
+        "import sys\n"
+        "for n in range(150): print(f'out {n}')\n"
+        "print('err line', file=sys.stderr)\n"
+        "sys.exit(4)"
+    )
+
+    result = command.step.execute(
+        FakeContext(tmp_path), {"argv": argv, "repo": repo_json(tmp_path)}
+    )
+
+    feedback = TypeAdapter(Passed | Feedback).validate_python(result)
+    assert isinstance(feedback, Feedback)
+    [item] = feedback.items
+    assert item.author == sys.executable
+    assert "exited with status 4" in item.body
+    tail = item.body.split("End of its output:\n")[1].splitlines()
+    assert tail == [f"out {n}" for n in range(51, 150)] + ["err line"]
+
+
+def test_command_within_a_sandbox_records_the_sandbox(tmp_path: Path) -> None:
+    sandbox = Sandbox(env={"A": "1"})
+
+    @workflow(trigger=TRIGGER)
+    def checked(run: Run) -> None:
+        for _ in until(
+            command.within(sandbox)(["make"], repo_at(tmp_path)), max_rounds=1
+        ):
+            pass
+
+    outcome = engine.replay(checked, Run(uuid4(), WORK), START, [])
+
+    assert isinstance(outcome, engine.Suspended)
+    assert outcome.call.sandbox == sandbox
+    assert outcome.call.function == "fledge.checks:command"
+    assert outcome.call.args["argv"] == ["make"]

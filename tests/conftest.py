@@ -6,7 +6,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from fledge.db import migrate
+from fledge.control.db import migrate
 
 ADMIN_URL = os.environ.get("FLEDGE_TEST_DATABASE_URL", "postgresql:///postgres")
 

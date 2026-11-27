@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, JsonValue
 
-from fledge.core import Turn, TurnResult
+from fledge.harnesses.base import Turn, TurnResult
 
 _SUMMARY_KEYS = ("command", "file_path", "pattern", "url", "description")
 

@@ -11,7 +11,7 @@ def migrate(database_url: str) -> None:
     migrations = sorted(
         (
             entry
-            for entry in files("fledge.migrations").iterdir()
+            for entry in files("fledge.control.migrations").iterdir()
             if entry.name.endswith(".sql")
         ),
         key=lambda entry: entry.name,

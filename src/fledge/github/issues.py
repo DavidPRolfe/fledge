@@ -1,25 +1,14 @@
 """Trigger for open GitHub issues in one repository that carry a label."""
 
-import os
 from dataclasses import dataclass
 from datetime import datetime
 
 import httpx
 from pydantic import BaseModel, TypeAdapter
 
-from fledge.core import Comment, TriggerCheckError, WorkItem
-
-API_URL = "https://api.github.com"
-GIT_URL = "https://github.com"
-
-
-class MissingTokenError(RuntimeError):
-    pass
-
-
-class _User(BaseModel):
-    login: str
-    type: str
+from fledge.core import WorkItem
+from fledge.github import api
+from fledge.triggers import Comment, TriggerCheckError
 
 
 class _PullRequestLink(BaseModel):
@@ -37,7 +26,7 @@ class _Issue(BaseModel):
 class _IssueComment(BaseModel):
     id: int
     body: str
-    user: _User
+    user: api.User
     created_at: datetime
 
 
@@ -71,22 +60,15 @@ class GitHubIssuesTrigger:
         # would silently turn one label into several.
         if not label or "," in label:
             raise ValueError(f"label must be non-empty without commas, got {label!r}")
-        token = os.environ.get("GITHUB_TOKEN")
-        if not token:
-            raise MissingTokenError("GITHUB_TOKEN is not set")
+        self._token = api.token()
         self._repo = repo
         self._label = label
-        self._token = token
         self._transport = transport
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            base_url=API_URL,
-            headers={
-                "Authorization": f"Bearer {self._token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            base_url=api.API_URL,
+            headers=api.headers(self._token),
             transport=self._transport,
         )
 
@@ -127,7 +109,7 @@ class GitHubIssuesTrigger:
         self._raise_for_access(repo, "see")
         self._raise_for_access(issues, "read the issues of")
         async with httpx.AsyncClient(
-            base_url=GIT_URL,
+            base_url=api.GIT_URL,
             auth=httpx.BasicAuth("x-access-token", self._token),
             transport=self._transport,
         ) as client:

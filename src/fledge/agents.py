@@ -17,10 +17,11 @@ from fledge.checks import (
     Settled,
     render_feedback,
 )
-from fledge.core import NO_SANDBOX, Harness, Repo, Sandbox, StepContext, Turn
+from fledge.core import NO_SANDBOX, Repo, Sandbox, StepContext
 from fledge.engine import step
+from fledge.git import GITHUB_TOKEN_ENV
+from fledge.harnesses.base import Harness, Turn
 
-GITHUB_TOKEN_ENV = "GITHUB_TOKEN"  # noqa: S105 - name of an env var, not a secret
 _COMMIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "fledge",
     "GIT_AUTHOR_EMAIL": "fledge@users.noreply.github.com",
@@ -129,7 +130,7 @@ def run_turn(
     ctx: StepContext, agent: str, prompt: str, repo: Repo, returns: str | None
 ) -> TurnOutput:
     """Prompt the named agent, then keep going while guidance is waiting."""
-    harness = ctx.agent(agent).harness
+    harness = ctx.harness(agent)
     schema: dict[str, JsonValue] | None = None
     if returns is not None:
         schema = TypeAdapter(engine.resolve_type(returns)).json_schema()

@@ -7,13 +7,13 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from pydantic import BaseModel, ConfigDict, JsonValue, StringConstraints
 
-from fledge.store import (
+from fledge.control.store import (
     CallKind,
     EventKind,
     Guidance,
     GuidanceSource,
-    Run,
     RunOrigin,
+    RunRow,
     RunStatus,
     StepStatus,
     Store,
@@ -106,14 +106,12 @@ async def run_detail(store: Store, run_id: UUID) -> RunDetail:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "run not found")
     return RunDetail(
         run=RunOut.model_validate(run),
-        steps=[
-            StepRunOut.model_validate(s) for s in await store.list_step_runs(run_id)
-        ],
+        steps=[StepRunOut.model_validate(s) for s in await store.list_journal(run_id)],
         guidance=[guidance_out(g) for g in await store.list_guidance(run_id)],
     )
 
 
-async def existing_run(store: Store, run_id: UUID) -> Run:
+async def existing_run(store: Store, run_id: UUID) -> RunRow:
     run = await store.get_run(run_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "run not found")

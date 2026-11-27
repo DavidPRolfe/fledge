@@ -64,7 +64,7 @@ def explode(ctx: StepContext) -> None:
 
 @step
 def harness_of(ctx: StepContext, agent: str) -> str:
-    return type(ctx.agent(agent).harness).__name__
+    return type(ctx.harness(agent)).__name__
 
 
 @workflow(trigger=NoTrigger())

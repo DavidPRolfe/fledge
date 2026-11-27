@@ -1,21 +1,15 @@
 import subprocess
-import sys
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import JsonValue, TypeAdapter
 
-from fledge import engine
 from fledge.agents import Agent
-from fledge.checks import Feedback, Passed, until
-from fledge.core import Repo, Run, Sandbox, WorkItem
-from fledge.engine import workflow
+from fledge.core import WorkItem
 from fledge.git import GitError
-from fledge.github import GitHubIssues
-from fledge.steps import clone_repo, command
+from fledge.harnesses.base import Harness
+from fledge.steps import clone_repo
 
 GITHUB_CREDENTIAL = "ghp_test_credential"
 
@@ -92,8 +86,8 @@ class FakeContext:
     def claim_guidance(self) -> list[str]:
         return self.pending_guidance.pop(0) if self.pending_guidance else []
 
-    def agent(self, name: str) -> Agent:
-        return self.agents[name]
+    def harness(self, agent: str) -> Harness:
+        return self.agents[agent].harness
 
 
 @pytest.mark.parametrize("with_token", [True, False])
@@ -152,77 +146,3 @@ def test_clone_repo_fails_when_the_directory_is_taken(
 
     with pytest.raises(GitError, match="clone"):
         clone_repo.execute(ctx, {"url": str(origin)})
-
-
-def repo_at(path: Path) -> Repo:
-    return Repo("https://github.com/acme/api", path, "fledge/x", "main")
-
-
-def repo_json(path: Path) -> dict[str, JsonValue]:
-    return {
-        "url": "https://github.com/acme/api",
-        "path": str(path),
-        "branch": "fledge/x",
-        "base": "main",
-    }
-
-
-def python(code: str) -> list[JsonValue]:
-    # Unbuffered, so stdout and stderr interleave in the order they are written.
-    return [sys.executable, "-u", "-c", code]
-
-
-def test_command_passes_in_the_repository(workspace: Path) -> None:
-    (workspace / "marker").write_text("")
-    argv = python(
-        "import pathlib, sys; sys.exit(0 if pathlib.Path('marker').exists() else 3)"
-    )
-
-    result = command.step.execute(
-        FakeContext(workspace), {"argv": argv, "repo": repo_json(workspace)}
-    )
-
-    assert result == {"kind": "passed"}
-
-
-def test_command_failure_is_feedback_with_the_tail_of_the_output(
-    workspace: Path,
-) -> None:
-    argv = python(
-        "import sys\n"
-        "for n in range(150): print(f'out {n}')\n"
-        "print('err line', file=sys.stderr)\n"
-        "sys.exit(4)"
-    )
-
-    result = command.step.execute(
-        FakeContext(workspace), {"argv": argv, "repo": repo_json(workspace)}
-    )
-
-    feedback = TypeAdapter(Passed | Feedback).validate_python(result)
-    assert isinstance(feedback, Feedback)
-    [item] = feedback.items
-    assert item.author == sys.executable
-    assert "exited with status 4" in item.body
-    tail = item.body.split("End of its output:\n")[1].splitlines()
-    assert tail == [f"out {n}" for n in range(51, 150)] + ["err line"]
-
-
-def test_command_within_a_sandbox_records_the_sandbox(workspace: Path) -> None:
-    sandbox = Sandbox(env={"A": "1"})
-
-    @workflow(trigger=GitHubIssues("acme/api", "fledge"))
-    def checked(run: Run) -> None:
-        for _ in until(
-            command.within(sandbox)(["make"], repo_at(workspace)), max_rounds=1
-        ):
-            pass
-
-    outcome = engine.replay(
-        checked, Run(uuid4(), FakeContext(workspace).work), datetime.now(UTC), []
-    )
-
-    assert isinstance(outcome, engine.Suspended)
-    assert outcome.call.sandbox == sandbox
-    assert outcome.call.function == "fledge.steps:command"
-    assert outcome.call.args["argv"] == ["make"]

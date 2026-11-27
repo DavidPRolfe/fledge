@@ -8,8 +8,8 @@ import pytest
 from pydantic import JsonValue
 
 from fledge import engine
-from fledge.agents import Agent
-from fledge.core import Run, Sandbox, Service, StepContext, Workflow, WorkItem
+from fledge.control.store import JournalRow, StepStatus
+from fledge.core import Run, Sandbox, Service, StepContext, WorkItem
 from fledge.engine import (
     Cancelled,
     Failed,
@@ -19,11 +19,12 @@ from fledge.engine import (
     StepFailed,
     Succeeded,
     Suspended,
+    Workflow,
     step,
     workflow,
 )
 from fledge.github import GitHubIssues
-from fledge.store import StepRun, StepStatus
+from fledge.harnesses.base import Harness
 
 START = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 WORK = WorkItem(
@@ -50,14 +51,14 @@ def finished_at(position: int) -> datetime:
     return START + timedelta(minutes=position + 1)
 
 
-def entry(run: Run, call: PendingCall, result: Result) -> StepRun:
+def entry(run: Run, call: PendingCall, result: Result) -> JournalRow:
     if isinstance(result, Fails):
         status: StepStatus = "failed"
         value: JsonValue = None
         error: str | None = result.error
     else:
         status, value, error = "succeeded", result, None
-    return StepRun(
+    return JournalRow(
         id=uuid4(),
         run_id=run.id,
         step_index=call.position,
@@ -79,7 +80,7 @@ def drive(
 ) -> tuple[Outcome, list[PendingCall]]:
     """Replay `flow`, recording each result for the call it suspends on."""
     run = Run(uuid4(), WORK)
-    journal: list[StepRun] = []
+    journal: list[JournalRow] = []
     calls: list[PendingCall] = []
     for result in results:
         outcome = engine.replay(flow, run, START, journal)
@@ -105,8 +106,8 @@ class FakeContext:
     def claim_guidance(self) -> list[str]:
         return []
 
-    def agent(self, name: str) -> Agent:
-        raise KeyError(name)
+    def harness(self, agent: str) -> Harness:
+        raise KeyError(agent)
 
 
 @dataclass(frozen=True)
@@ -323,7 +324,7 @@ def test_the_journal_entry_of_a_started_call_is_on_the_pending_call() -> None:
     run = Run(uuid4(), WORK)
     first = engine.replay(flow, run, START, [])
     assert isinstance(first, Suspended)
-    running = StepRun(
+    running = JournalRow(
         id=uuid4(),
         run_id=run.id,
         step_index=0,

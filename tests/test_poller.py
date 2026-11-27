@@ -4,11 +4,12 @@ from datetime import datetime
 
 import pytest
 
-from fledge.core import Comment, WorkItem
-from fledge.poller import Poller
-from fledge.settings import Settings
-from fledge.store import Store, WorkflowRef
-from fledge.workflows import TriggerBinding
+from fledge.control.poller import Poller
+from fledge.control.settings import Settings
+from fledge.control.snapshots import TriggerBinding
+from fledge.control.store import Store, WorkflowRef
+from fledge.core import WorkItem
+from fledge.triggers import Comment
 
 pytestmark = pytest.mark.anyio
 

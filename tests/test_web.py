@@ -6,10 +6,11 @@ import httpx
 import pytest
 from pydantic import JsonValue
 
-from fledge.core import Comment, WorkItem
-from fledge.store import Run, StepRun, Store, WorkflowRef, hash_token
-from fledge.web.app import create_app
-from fledge.workflows import TriggerBinding
+from fledge.control.snapshots import TriggerBinding
+from fledge.control.store import JournalRow, RunRow, Store, WorkflowRef, hash_token
+from fledge.control.web.app import create_app
+from fledge.core import WorkItem
+from fledge.triggers import Comment
 
 pytestmark = pytest.mark.anyio
 
@@ -65,19 +66,19 @@ async def client(store: Store) -> AsyncIterator[httpx.AsyncClient]:
         yield client
 
 
-async def make_run(store: Store, title: str = "Fix the thing") -> Run:
+async def make_run(store: Store, title: str = "Fix the thing") -> RunRow:
     return await store.create_manual_run(TICKET_TO_PR, work_item("1", title))
 
 
 async def make_step(
     store: Store,
-    run: Run,
+    run: RunRow,
     index: int = 0,
     name: str = "clone_repo",
     args: dict[str, JsonValue] | None = None,
-) -> tuple[StepRun, str]:
+) -> tuple[JournalRow, str]:
     token = f"token-{uuid4()}"
-    step = await store.create_step_run(
+    step = await store.create_journal_row(
         run.id,
         index,
         kind="step",
@@ -139,7 +140,7 @@ async def test_get_run_includes_steps_and_guidance(
 ) -> None:
     run = await make_run(store)
     step, _ = await make_step(store, run)
-    await store.finish_step_run(step.id, "succeeded", {"branch": "fledge/1"})
+    await store.finish_journal_row(step.id, "succeeded", {"branch": "fledge/1"})
     await store.add_guidance(run.id, "web", "web", "first")
     await store.claim_guidance(run.id)
     await store.add_guidance(run.id, "trigger", "alice", "second", external_id="c1")
@@ -264,7 +265,7 @@ async def test_internal_routes_require_the_step_token(
         method, f"/internal/step-runs/{step.id}{suffix}", json=payload, headers=headers
     )
     assert response.status_code == 401
-    refreshed = await store.get_step_run(step.id)
+    refreshed = await store.get_journal_row(step.id)
     assert refreshed is not None
     assert refreshed.status == "running"
     [guidance] = await store.list_guidance(run.id)
@@ -281,7 +282,7 @@ async def test_internal_context_has_the_calls_function_and_arguments(
 ) -> None:
     run = await make_run(store)
     clone, _ = await make_step(store, run, 0, "clone_repo")
-    await store.finish_step_run(clone.id, "succeeded", {"branch": "fledge/1"})
+    await store.finish_journal_row(clone.id, "succeeded", {"branch": "fledge/1"})
     implement, token = await make_step(
         store, run, 1, "run_turn", {"agent": "implementer", "prompt": "Fix it"}
     )
@@ -371,7 +372,7 @@ async def test_internal_result_is_recorded_once_with_a_state_event(
 
     response = await client.post(url, json=result, headers=bearer(token))
     assert response.status_code == 204
-    finished = await store.get_step_run(step.id)
+    finished = await store.get_journal_row(step.id)
     assert finished is not None
     assert (finished.status, finished.result, finished.error) == (
         result["status"],
@@ -387,7 +388,7 @@ async def test_internal_result_is_recorded_once_with_a_state_event(
         url, json={"status": "succeeded", "result": "late"}, headers=bearer(token)
     )
     assert response.status_code == 409
-    unchanged = await store.get_step_run(step.id)
+    unchanged = await store.get_journal_row(step.id)
     assert unchanged == finished
     assert len(await store.list_events(run.id)) == 1
 
@@ -418,7 +419,7 @@ async def test_run_page_renders_calls_and_guidance(
     ]
     for index, result in enumerate(results):
         step, _ = await make_step(store, run, index, f"call_{index}")
-        await store.finish_step_run(step.id, "succeeded", result)
+        await store.finish_journal_row(step.id, "succeeded", result)
     await store.add_guidance(run.id, "web", "web", "<b>bold</b>")
 
     response = await client.get(f"/runs/{run.id}")

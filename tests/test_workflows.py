@@ -4,19 +4,14 @@ from pathlib import Path
 import pytest
 
 from fledge import engine
-from fledge.core import Trigger
+from fledge.control.snapshots import SnapshotLoader, start_triggers
+from fledge.control.store import Store, WorkflowRef
 from fledge.github import GitHubIssues
-from fledge.github.issues import MissingTokenError
+from fledge.github.api import MissingTokenError
 from fledge.harnesses import ClaudeCode
-from fledge.store import Store, WorkflowRef
-from fledge.workflows import (
-    SnapshotLoader,
-    load_workflows,
-    read_snapshot,
-    snapshot_hash,
-    start_triggers,
-    write_github_workflow,
-)
+from fledge.scaffold import write_github_workflow
+from fledge.triggers import Trigger
+from fledge.workflows import load_workflows, read_snapshot, snapshot_hash
 
 TICKETS = """\
 from fledge import Run, workflow

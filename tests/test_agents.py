@@ -10,10 +10,19 @@ from pydantic import JsonValue, TypeAdapter
 from fledge import engine
 from fledge.agents import Agent, Review, run_turn
 from fledge.checks import Feedback, FeedbackItem, until
-from fledge.core import Repo, Run, Sandbox, Turn, TurnResult, Workflow, WorkItem
-from fledge.engine import Failed, Outcome, PendingCall, Succeeded, Suspended, workflow
+from fledge.control.store import JournalRow
+from fledge.core import Repo, Run, Sandbox, WorkItem
+from fledge.engine import (
+    Failed,
+    Outcome,
+    PendingCall,
+    Succeeded,
+    Suspended,
+    Workflow,
+    workflow,
+)
 from fledge.github import GitHubIssues
-from fledge.store import StepRun
+from fledge.harnesses.base import Harness, Turn, TurnResult
 
 START = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 WORK = WorkItem(
@@ -66,8 +75,8 @@ def finished_at(position: int) -> datetime:
     return START + timedelta(minutes=position + 1)
 
 
-def entry(run: Run, call: PendingCall, result: JsonValue) -> StepRun:
-    return StepRun(
+def entry(run: Run, call: PendingCall, result: JsonValue) -> JournalRow:
+    return JournalRow(
         id=uuid4(),
         run_id=run.id,
         step_index=call.position,
@@ -89,7 +98,7 @@ def drive(
 ) -> tuple[Outcome, list[PendingCall]]:
     """Replay `flow`, recording each result for the call it suspends on."""
     run = Run(uuid4(), WORK)
-    journal: list[StepRun] = []
+    journal: list[JournalRow] = []
     calls: list[PendingCall] = []
     for result in results:
         outcome = engine.replay(flow, run, START, journal)
@@ -218,8 +227,8 @@ class FakeContext:
     def claim_guidance(self) -> list[str]:
         return self.pending_guidance.pop(0) if self.pending_guidance else []
 
-    def agent(self, name: str) -> Agent:
-        return self.agents[name]
+    def harness(self, agent: str) -> Harness:
+        return self.agents[agent].harness
 
 
 def turn_args(

@@ -1,5 +1,7 @@
 """Checks, and the `until` gate that loops on their feedback."""
 
+import shlex
+import subprocess
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -8,8 +10,10 @@ from typing import Annotated, Concatenate, Literal, Protocol, overload
 from pydantic import Field, JsonValue, TypeAdapter
 
 from fledge import engine
-from fledge.core import NO_SANDBOX, Run, Sandbox, StepContext
+from fledge.core import NO_SANDBOX, Repo, Run, Sandbox, StepContext
 from fledge.engine import RunStopped, Step
+
+OUTPUT_TAIL_LINES = 100
 
 
 @dataclass(frozen=True)
@@ -202,3 +206,26 @@ def wait[**P](
         return _WaitCheck(fn, args, kwargs)
 
     return build
+
+
+@check
+def command(ctx: StepContext, argv: list[str], repo: Repo) -> Passed | Feedback:
+    """Passes when `argv` exits with status 0 in the repository."""
+    ctx.log(f"running {shlex.join(argv)} in {repo.path}")
+    result = subprocess.run(  # noqa: S603 - argv comes from workflow code and runs without a shell
+        argv,
+        cwd=repo.path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode == 0:
+        return Passed()
+    tail = "\n".join(result.stdout.splitlines()[-OUTPUT_TAIL_LINES:])
+    body = (
+        f"`{shlex.join(argv)}` exited with status {result.returncode}.\n\n"
+        f"End of its output:\n{tail}"
+    )
+    return Feedback([FeedbackItem(argv[0], body)])

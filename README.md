@@ -274,7 +274,7 @@ reviewer sees the implementer's working tree.
 
 `agent.prompt(..., returns=SomeType)` makes the agent finish with a value of
 that type (a dataclass or Pydantic model) and returns it; `approves` is built
-on it. `command(argv, repo)` in `fledge.steps` is a check that passes when a
+on it. `command(argv, repo)` in `fledge.checks` is a check that passes when a
 command exits with status 0 and otherwise hands its output's tail back as
 feedback.
 
@@ -363,16 +363,19 @@ the change by itself.
 | Path | What it holds |
 | --- | --- |
 | `src/fledge/__init__.py` | The workflow author's API |
-| `src/fledge/core.py` | The types and interfaces extensions implement |
+| `src/fledge/core.py` | The types workflow code and steps use |
+| `src/fledge/triggers.py`, `harnesses/base.py` | The interfaces triggers and harnesses implement |
 | `src/fledge/engine.py` | Replaying workflow functions; `@step` and `@workflow` |
-| `src/fledge/checks.py`, `agents.py` | Checks, waits and `until`; agents |
-| `src/fledge/steps.py`, `github/`, `harnesses/` | Built-in steps and checks, the GitHub trigger and pull requests, Claude Code and Codex |
-| `src/fledge/workflows.py` | Loading and snapshotting the workflows directory, `fledge init` |
-| `src/fledge/poller.py`, `orchestrator.py` | The two control-plane loops |
-| `src/fledge/runner/` | Starting step containers and their services; Docker only for now |
-| `src/fledge/executor.py` | What runs inside a step container |
-| `src/fledge/web/` | Public API, internal API for step containers, web view |
-| `src/fledge/store.py`, `migrations/` | Postgres queries and schema |
+| `src/fledge/checks.py`, `agents.py` | Checks, waits, `until` and the built-in `command` check; agents |
+| `src/fledge/steps.py`, `github/`, `harnesses/` | Built-in steps, the GitHub trigger and pull requests, Claude Code and Codex |
+| `src/fledge/workflows.py` | Loading and snapshotting the workflows directory |
+| `src/fledge/scaffold.py` | The workflow `fledge init` writes |
+| `src/fledge/executor.py`, `wire.py` | What runs inside a step container, and its contract with the control plane |
+| `src/fledge/control/` | The control plane; nothing outside it but the CLI imports it |
+| `src/fledge/control/poller.py`, `orchestrator.py` | The two control-plane loops |
+| `src/fledge/control/runner/` | Starting step containers and their services; Docker only for now |
+| `src/fledge/control/web/` | Public API, internal API for step containers, web view |
+| `src/fledge/control/store.py`, `migrations/` | Postgres queries and schema |
 | `src/fledge/cli.py` | `fledge serve`, `init`, `submit`, `migrate`, `step-exec` |
 
 ### Writing an extension
@@ -381,10 +384,11 @@ Steps (`@step`), checks that run in a container (`@check`), checks the control
 plane polls (`@wait`), harnesses (a class with a `run_turn` method) and
 triggers (a `TriggerSpec` whose `start()` returns a `Trigger`) are plain
 Python in the workflows directory, next to the workflows that use them. The
-interfaces are in `fledge.core` and section 3 of the architecture doc. The
-control plane snapshots the whole directory when it starts and hands each
-run's step containers the snapshot the run started with, so editing a
-workflow needs a restart of `fledge serve`, not an image rebuild.
+interfaces are in `fledge.triggers`, `fledge.harnesses` and section 3 of the
+architecture doc. The control plane snapshots the whole directory when it
+starts and hands each run's step containers the snapshot the run started
+with, so editing a workflow needs a restart of `fledge serve`, not an image
+rebuild.
 
 A third-party library a workflow imports, the CLI a custom harness wraps, or
 a toolchain the target repositories need has to be installed in the image:

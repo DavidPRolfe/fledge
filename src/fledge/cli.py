@@ -8,22 +8,18 @@ from pathlib import Path
 import httpx
 import uvicorn
 
-from fledge.core import TriggerCheckError
-from fledge.db import migrate
+from fledge.control.db import migrate
+from fledge.control.orchestrator import Orchestrator
+from fledge.control.poller import Poller
+from fledge.control.runner.docker import DockerRunner
+from fledge.control.settings import Settings
+from fledge.control.snapshots import SnapshotLoader, start_triggers
+from fledge.control.store import Store
+from fledge.control.web.app import create_app
 from fledge.executor import execute_from_env
-from fledge.orchestrator import Orchestrator
-from fledge.poller import Poller
-from fledge.runner.docker import DockerRunner
-from fledge.settings import Settings
-from fledge.store import Store
-from fledge.web.app import create_app
-from fledge.workflows import (
-    SnapshotLoader,
-    load_workflows,
-    read_snapshot,
-    start_triggers,
-    write_github_workflow,
-)
+from fledge.scaffold import write_github_workflow
+from fledge.triggers import TriggerCheckError
+from fledge.workflows import load_workflows, read_snapshot
 
 logger = logging.getLogger(__name__)
 

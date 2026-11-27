@@ -8,8 +8,8 @@ from docker.errors import NotFound
 from docker.models.containers import Container
 from docker.models.networks import Network
 
+from fledge.control.runner.base import STEP_COMMAND, ContainerState, StepSpec
 from fledge.core import Service
-from fledge.runner.base import STEP_COMMAND, ContainerState, StepSpec
 from fledge.wire import WORKSPACE_PATH
 
 # "created" counts as running: start_step creates a container and starts it

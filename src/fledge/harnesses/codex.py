@@ -15,7 +15,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
-from fledge.core import Turn, TurnResult
+from fledge.harnesses.base import Turn, TurnResult
 
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 

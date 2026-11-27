@@ -6,16 +6,16 @@ import anyio
 import pytest
 from pydantic import JsonValue
 
-from fledge.core import WorkItem
-from fledge.store import (
+from fledge.control.store import (
     CallKind,
-    Run,
-    StepRun,
+    JournalRow,
+    RunRow,
     Store,
     TerminalRunStatus,
     WorkflowRef,
     hash_token,
 )
+from fledge.core import WorkItem
 
 pytestmark = pytest.mark.anyio
 
@@ -42,7 +42,7 @@ async def store(database_url: str) -> AsyncIterator[Store]:
         yield store
 
 
-async def make_run(store: Store, external_id: str = "42") -> Run:
+async def make_run(store: Store, external_id: str = "42") -> RunRow:
     return await store.create_manual_run(TICKET_TO_PR, work_item(external_id))
 
 
@@ -81,7 +81,7 @@ async def test_polled_run_is_created_once_per_item(store: Store) -> None:
 
 
 async def test_concurrent_polls_create_one_run(store: Store) -> None:
-    created: list[Run | None] = []
+    created: list[RunRow | None] = []
 
     async def poll() -> None:
         created.append(await store.create_polled_run(TICKET_TO_PR, work_item("7")))
@@ -145,9 +145,9 @@ async def test_pending_run_can_be_finished(store: Store) -> None:
 
 
 async def make_call(
-    store: Store, run: Run, index: int, kind: CallKind = "step"
-) -> StepRun:
-    return await store.create_step_run(
+    store: Store, run: RunRow, index: int, kind: CallKind = "step"
+) -> JournalRow:
+    return await store.create_journal_row(
         run.id,
         index,
         kind,
@@ -171,20 +171,20 @@ async def test_step_runs_form_the_journal(store: Store) -> None:
     assert (first.status, first.result, first.finished_at) == ("running", None, None)
     assert first.token_hash == hashlib.sha256(b"token-0").hexdigest()
     assert second.kind == "wait"
-    assert await store.get_step_run(first.id) == first
-    assert await store.get_step_run(uuid4()) is None
-    assert [step.id for step in await store.list_step_runs(run.id)] == [
+    assert await store.get_journal_row(first.id) == first
+    assert await store.get_journal_row(uuid4()) is None
+    assert [step.id for step in await store.list_journal(run.id)] == [
         first.id,
         second.id,
     ]
 
     result: JsonValue = {"branch": "fledge/42", "files": ["a.py"], "ok": True}
-    assert await store.finish_step_run(first.id, "succeeded", result)
-    assert await store.finish_step_run(second.id, "cancelled")
+    assert await store.finish_journal_row(first.id, "succeeded", result)
+    assert await store.finish_journal_row(second.id, "cancelled")
     # A result reported after the call was cancelled must not replace the outcome.
-    assert not await store.finish_step_run(second.id, "succeeded", "late")
+    assert not await store.finish_journal_row(second.id, "succeeded", "late")
 
-    done, cancelled = await store.list_step_runs(run.id)
+    done, cancelled = await store.list_journal(run.id)
     assert (done.status, done.result, done.error) == ("succeeded", result, None)
     assert done.finished_at is not None
     assert (cancelled.status, cancelled.result) == ("cancelled", None)
@@ -195,9 +195,9 @@ async def test_step_result_may_be_any_json(store: Store, result: JsonValue) -> N
     run = await make_run(store)
     call = await make_call(store, run, 0)
 
-    assert await store.finish_step_run(call.id, "succeeded", result)
+    assert await store.finish_journal_row(call.id, "succeeded", result)
 
-    finished = await store.get_step_run(call.id)
+    finished = await store.get_journal_row(call.id)
     assert finished is not None
     assert finished.result == result
 
@@ -206,9 +206,9 @@ async def test_failed_step_records_its_error(store: Store) -> None:
     run = await make_run(store)
     call = await make_call(store, run, 0)
 
-    assert await store.finish_step_run(call.id, "failed", error="boom")
+    assert await store.finish_journal_row(call.id, "failed", error="boom")
 
-    failed = await store.get_step_run(call.id)
+    failed = await store.get_journal_row(call.id)
     assert failed is not None
     assert (failed.status, failed.error) == ("failed", "boom")
 
@@ -223,7 +223,7 @@ async def test_count_running_steps_spans_runs_and_skips_waits(store: Store) -> N
     await make_call(store, other, 1, "wait")
     assert await store.count_running_steps() == 2
 
-    assert await store.finish_step_run(step.id, "succeeded")
+    assert await store.finish_journal_row(step.id, "succeeded")
     assert await store.count_running_steps() == 1
 
 

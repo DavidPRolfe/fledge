@@ -14,12 +14,13 @@ from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Concatenate, Literal, overload
+from typing import Concatenate, Literal, Protocol, overload
+from uuid import UUID
 
 from pydantic import JsonValue, TypeAdapter
 
-from fledge.core import NO_SANDBOX, Run, Sandbox, StepContext, TriggerSpec, Workflow
-from fledge.store import StepRun
+from fledge.core import NO_SANDBOX, Run, Sandbox, StepContext
+from fledge.triggers import TriggerSpec
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,40 @@ class RunStopped(BaseException):
 
 
 @dataclass(frozen=True)
+class Workflow:
+    name: str
+    trigger: TriggerSpec
+    fn: Callable[[Run], None]
+
+
+class JournalEntry(Protocol):
+    """One recorded call of a run, as the engine reads it from the journal."""
+
+    @property
+    def id(self) -> UUID: ...
+
+    @property
+    def function(self) -> str: ...
+
+    @property
+    def status(self) -> str:
+        """`running`, `succeeded`, `failed` or `cancelled`."""
+        ...
+
+    @property
+    def result(self) -> JsonValue: ...
+
+    @property
+    def error(self) -> str | None: ...
+
+    @property
+    def started_at(self) -> datetime: ...
+
+    @property
+    def finished_at(self) -> datetime | None: ...
+
+
+@dataclass(frozen=True)
 class PendingCall:
     """The call a suspended run is waiting on."""
 
@@ -51,7 +86,7 @@ class PendingCall:
     function: str
     args: dict[str, JsonValue]
     sandbox: Sandbox
-    entry: StepRun | None
+    entry: JournalEntry | None
     """The journal row if the call has already been started."""
     poll: Callable[[datetime], JsonValue | None] | None
     """For a wait: evaluates it once, given when the wait began. None means
@@ -90,7 +125,7 @@ Outcome = Succeeded | Failed | Cancelled | Suspended
 @dataclass
 class _Replay:
     run: Run
-    journal: Sequence[StepRun]
+    journal: Sequence[JournalEntry]
     clock: datetime
     cursor: int = 0
 
@@ -106,7 +141,10 @@ def _state() -> _Replay:
 
 
 def replay(
-    workflow: Workflow, run: Run, started_at: datetime, journal: Sequence[StepRun]
+    workflow: Workflow,
+    run: Run,
+    started_at: datetime,
+    journal: Sequence[JournalEntry],
 ) -> Outcome:
     """Call the workflow function against the journal, which is in call order."""
     token = _current.set(_Replay(run, journal, started_at))

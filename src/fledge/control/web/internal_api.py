@@ -7,14 +7,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 
-from fledge.store import StepRun, Store, hash_token
+from fledge.control.store import JournalRow, Store, hash_token
 from fledge.wire import EventsIn, GuidanceClaim, StepResult, StepRunContext
 
 
-def _step_run_auth(store: Store) -> Callable[..., Awaitable[StepRun]]:
+def _step_run_auth(store: Store) -> Callable[..., Awaitable[JournalRow]]:
     async def authorized_step_run(
         step_run_id: UUID, authorization: Annotated[str | None, Header()] = None
-    ) -> StepRun:
+    ) -> JournalRow:
         unauthorized = HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             "missing or invalid bearer token",
@@ -25,7 +25,7 @@ def _step_run_auth(store: Store) -> Callable[..., Awaitable[StepRun]]:
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() != "bearer" or not token:
             raise unauthorized
-        step_run = await store.get_step_run(step_run_id)
+        step_run = await store.get_journal_row(step_run_id)
         if step_run is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "step run not found")
         if not hmac.compare_digest(hash_token(token), step_run.token_hash):
@@ -41,7 +41,7 @@ def internal_routes(store: Store) -> APIRouter:
 
     @router.get("")
     async def context(
-        step_run: Annotated[StepRun, Depends(authorized_step_run)],
+        step_run: Annotated[JournalRow, Depends(authorized_step_run)],
     ) -> StepRunContext:
         run = await store.get_run(step_run.run_id)
         if run is None:
@@ -58,7 +58,7 @@ def internal_routes(store: Store) -> APIRouter:
 
     @router.post("/events", status_code=status.HTTP_204_NO_CONTENT)
     async def append_events(
-        step_run: Annotated[StepRun, Depends(authorized_step_run)], body: EventsIn
+        step_run: Annotated[JournalRow, Depends(authorized_step_run)], body: EventsIn
     ) -> None:
         await store.append_events(
             step_run.run_id,
@@ -68,16 +68,16 @@ def internal_routes(store: Store) -> APIRouter:
 
     @router.post("/guidance/claim")
     async def claim_guidance(
-        step_run: Annotated[StepRun, Depends(authorized_step_run)],
+        step_run: Annotated[JournalRow, Depends(authorized_step_run)],
     ) -> GuidanceClaim:
         claimed = await store.claim_guidance(step_run.run_id)
         return GuidanceClaim(bodies=[guidance.body for guidance in claimed])
 
     @router.post("/result", status_code=status.HTTP_204_NO_CONTENT)
     async def report_result(
-        step_run: Annotated[StepRun, Depends(authorized_step_run)], body: StepResult
+        step_run: Annotated[JournalRow, Depends(authorized_step_run)], body: StepResult
     ) -> None:
-        recorded = await store.finish_step_run(
+        recorded = await store.finish_journal_row(
             step_run.id, body.status, body.result, body.error
         )
         if not recorded:

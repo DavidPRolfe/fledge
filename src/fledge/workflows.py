@@ -8,7 +8,6 @@ import hashlib
 import importlib
 import importlib.util
 import json
-import re
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -17,68 +16,7 @@ from importlib.machinery import ModuleSpec
 from pathlib import Path
 
 from fledge.agents import Agent
-from fledge.core import Trigger, Workflow
-from fledge.store import Store, WorkflowRef
-
-_GITHUB_REPO = re.compile(r"[\w.-]+/[\w.-]+")
-
-# Braces the written file's own IMPLEMENT template needs are doubled here.
-_GITHUB_WORKFLOW = '''\
-"""The workflow runs once per labelled issue. An agent implements the issue,
-opens a pull request, and handles CI failures and review comments until it is
-merged.
-
-Each step runs in its own container. To resume a run, Fledge calls this
-function again from the top and reuses the results of steps that already ran,
-so keep I/O and clock reads inside steps. Do not catch BaseException: Fledge
-pauses a run by raising one.
-"""
-
-from fledge import Agent, Run, until, workflow
-from fledge.github import (
-    GitHubIssues,
-    checks_green,
-    mark_ready,
-    merged,
-    open_pull_request,
-    push,
-)
-from fledge.harnesses import ClaudeCode
-from fledge.steps import clone_repo
-
-IMPLEMENT = """\\
-Resolve this ticket by changing the repository in the current working directory.
-
-Title: {{work.title}}
-Link: {{work.url}}
-
-{{work.body}}
-
-Make the change, run the project's checks if it has any, and commit your work
-on the current branch. Do not push and do not open a pull request yet: you
-will be asked to. End with a short summary of what you changed and why.
-"""
-
-implementer = Agent({agent}, ClaudeCode())
-
-
-@workflow(trigger=GitHubIssues(repo={repo}, label={label}))
-def {name}(run: Run) -> None:
-    repo = clone_repo(run.work.repo_url)
-    implementer.prompt(IMPLEMENT.format(work=run.work), repo)
-
-    # If CI is still failing after 5 fixes, the run fails.
-    pr = open_pull_request(implementer, repo, draft=True)
-    for feedback in until(checks_green(pr), max_rounds=5):
-        implementer.prompt(feedback, repo)
-        push(implementer, pr)
-    mark_ready(pr)
-
-    # If the pull request is closed without merging, the run is cancelled.
-    for feedback in until(merged(pr), max_rounds=20):
-        implementer.prompt(feedback, repo)
-        push(implementer, pr)
-'''
+from fledge.engine import Workflow
 
 
 @dataclass(frozen=True)
@@ -92,12 +30,6 @@ class Snapshot:
 class Loaded:
     workflows: Mapping[str, Workflow]
     agents: Mapping[str, Agent]
-
-
-@dataclass(frozen=True)
-class TriggerBinding:
-    trigger: Trigger
-    workflow: WorkflowRef
 
 
 def snapshot_hash(files: Mapping[str, str]) -> str:
@@ -170,65 +102,3 @@ def _add[T](found: dict[str, T], name: str, value: T, kind: str) -> None:
     existing = found.setdefault(name, value)
     if existing is not value:
         raise ValueError(f"two {kind} are named {name!r}")
-
-
-class SnapshotLoader:
-    """Loads the workflows of stored snapshots, so a run keeps the code it started with."""
-
-    def __init__(self, store: Store) -> None:
-        self._store = store
-
-    async def workflow(self, snapshot_hash: str, name: str) -> Workflow:
-        files = await self._store.get_snapshot_files(snapshot_hash)
-        workflows = load_workflows(files).workflows
-        if name not in workflows:
-            raise LookupError(
-                f"workflow snapshot {snapshot_hash[:12]} has no workflow {name!r}"
-            )
-        return workflows[name]
-
-
-def start_triggers(
-    snapshot_hash: str, workflows: Mapping[str, Workflow]
-) -> dict[str, TriggerBinding]:
-    """Start each workflow's trigger, keyed by workflow name."""
-    return {
-        name: TriggerBinding(
-            workflow.trigger.start(),
-            WorkflowRef(name=name, snapshot_hash=snapshot_hash),
-        )
-        for name, workflow in workflows.items()
-    }
-
-
-def _python_str(value: str) -> str:
-    # A JSON string without ASCII escaping is also a valid Python literal for
-    # the same text, and uses the double quotes the formatter would.
-    return json.dumps(value, ensure_ascii=False)
-
-
-def write_github_workflow(directory: Path, name: str, repo: str, label: str) -> Path:
-    """Write a workflow that turns labelled issues in `repo` into pull requests.
-
-    Refuses to overwrite an existing file.
-    """
-    if not name.isidentifier():
-        raise ValueError(f"name must be a Python identifier, got {name!r}")
-    if not _GITHUB_REPO.fullmatch(repo):
-        raise ValueError(f"repo must be 'owner/name', got {repo!r}")
-    # GitHub takes the labels filter as a comma-separated list.
-    if not label or "," in label:
-        raise ValueError(f"label must be non-empty without commas, got {label!r}")
-    source = _GITHUB_WORKFLOW.format(
-        name=name,
-        # Agent names are unique across the workflows directory, and init can
-        # write several workflows into one.
-        agent=_python_str(f"{name}_implementer"),
-        repo=_python_str(repo),
-        label=_python_str(label),
-    )
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{name}.py"
-    with path.open("x") as file:
-        file.write(source)
-    return path

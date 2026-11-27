@@ -16,6 +16,7 @@ from pydantic import JsonValue
 from fledge import engine
 from fledge.agents import Agent
 from fledge.core import WorkItem
+from fledge.harnesses.base import Harness
 from fledge.wire import (
     API_URL_ENV,
     READY_PORTS_ENV,
@@ -126,10 +127,10 @@ class ExecutorContext:
     def claim_guidance(self) -> list[str]:
         return self.control_plane.claim_guidance()
 
-    def agent(self, name: str) -> Agent:
-        if name not in self.agents:
-            raise LookupError(f"the run's workflow code defines no agent {name!r}")
-        return self.agents[name]
+    def harness(self, agent: str) -> Harness:
+        if agent not in self.agents:
+            raise LookupError(f"the run's workflow code defines no agent {agent!r}")
+        return self.agents[agent].harness
 
 
 def wait_for_services(addresses: Sequence[str], policy: ReadyPolicy) -> None:

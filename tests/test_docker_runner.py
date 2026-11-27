@@ -15,9 +15,8 @@ import docker
 import pytest
 from docker.errors import DockerException, NotFound
 
-from fledge.core import Service
-from fledge.runner.base import ContainerState, StepSpec
-from fledge.runner.docker import (
+from fledge.control.runner.base import ContainerState, StepSpec
+from fledge.control.runner.docker import (
     IMAGE_SOURCE_PATH,
     STEP_RUN_LABEL,
     DockerRunner,
@@ -26,6 +25,7 @@ from fledge.runner.docker import (
     service_container_name,
     volume_name,
 )
+from fledge.core import Service
 from fledge.wire import WORKSPACE_PATH
 
 IMAGE = "docker.io/library/alpine:3.20"

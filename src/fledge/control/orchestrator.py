@@ -17,16 +17,22 @@ from uuid import UUID
 from pydantic import JsonValue
 
 from fledge import checks, core, engine
-from fledge.runner.base import ContainerState, Runner, StepSpec
-from fledge.settings import Settings
-from fledge.store import Run, StepRun, Store, TerminalRunStatus, hash_token
+from fledge.control.runner.base import ContainerState, Runner, StepSpec
+from fledge.control.settings import Settings
+from fledge.control.store import (
+    JournalRow,
+    RunRow,
+    Store,
+    TerminalRunStatus,
+    hash_token,
+)
 from fledge.wire import API_URL_ENV, READY_PORTS_ENV, STEP_RUN_ID_ENV, STEP_TOKEN_ENV
 
 logger = logging.getLogger(__name__)
 
 TICK_INTERVAL_SECONDS = 2.0
 
-LoadWorkflow = Callable[[str, str], Awaitable[core.Workflow]]
+LoadWorkflow = Callable[[str, str], Awaitable[engine.Workflow]]
 """Loads a workflow by (snapshot hash, workflow name)."""
 
 
@@ -86,8 +92,8 @@ class Orchestrator:
             if await self._store.mark_run_running(run.id):
                 await self._store.append_event(run.id, "state", "run started")
 
-    async def _reconcile(self, run: Run) -> None:
-        journal = await self._store.list_step_runs(run.id)
+    async def _reconcile(self, run: RunRow) -> None:
+        journal = await self._store.list_journal(run.id)
         latest = journal[-1] if journal else None
         if run.cancel_requested:
             await self._cancel_running(run, latest)
@@ -102,7 +108,7 @@ class Orchestrator:
         await self._continue(run, journal, latest)
 
     async def _continue(
-        self, run: Run, journal: Sequence[StepRun], latest: StepRun | None
+        self, run: RunRow, journal: Sequence[JournalRow], latest: JournalRow | None
     ) -> None:
         if run.snapshot_hash is None or run.started_at is None:
             raise RuntimeError(f"run {run.id} has no workflow snapshot or start time")
@@ -121,7 +127,7 @@ class Orchestrator:
                 await self._advance(run, call, latest)
 
     async def _advance(
-        self, run: Run, call: engine.PendingCall, latest: StepRun | None
+        self, run: RunRow, call: engine.PendingCall, latest: JournalRow | None
     ) -> None:
         if call.entry is not None and call.entry.status == "cancelled":
             await self._end_run(run, latest, "cancelled", None)
@@ -130,20 +136,20 @@ class Orchestrator:
         else:
             await self._wait(run, call)
 
-    async def _cancel_running(self, run: Run, latest: StepRun | None) -> None:
+    async def _cancel_running(self, run: RunRow, latest: JournalRow | None) -> None:
         if latest is not None and latest.status == "running":
             if latest.kind == "step":
                 await self._runner.stop_step(latest.id)
             # False means the step posted a result just before it was stopped,
             # and the internal API has already put that on the timeline.
-            if await self._store.finish_step_run(latest.id, "cancelled"):
+            if await self._store.finish_journal_row(latest.id, "cancelled"):
                 await self._store.append_event(
                     run.id, "state", f"{_label(latest)} cancelled", latest.id
                 )
             self._last_polled.pop(latest.id, None)
         await self._end_run(run, latest, "cancelled", None)
 
-    async def _start_step(self, run: Run, call: engine.PendingCall) -> None:
+    async def _start_step(self, run: RunRow, call: engine.PendingCall) -> None:
         if call.entry is not None:
             raise RuntimeError(
                 f"call {call.position} of run {run.id} is already started"
@@ -151,7 +157,7 @@ class Orchestrator:
         if await self._store.count_running_steps() >= self._config.max_concurrent_steps:
             return
         token = secrets.token_urlsafe(32)
-        step_run = await self._store.create_step_run(
+        step_run = await self._store.create_journal_row(
             run.id,
             call.position,
             "step",
@@ -189,12 +195,12 @@ class Orchestrator:
             run.id, "state", f"step {call.name} started", step_run.id
         )
 
-    async def _wait(self, run: Run, call: engine.PendingCall) -> None:
+    async def _wait(self, run: RunRow, call: engine.PendingCall) -> None:
         entry = call.entry
         if entry is None:
             # Nothing authenticates as a wait, but the column is required, so
             # it holds the hash of a token that is never handed out.
-            entry = await self._store.create_step_run(
+            entry = await self._store.create_journal_row(
                 run.id,
                 call.position,
                 "wait",
@@ -228,14 +234,14 @@ class Orchestrator:
             raise
         if result is None:
             return
-        if await self._store.finish_step_run(entry.id, "succeeded", result):
+        if await self._store.finish_journal_row(entry.id, "succeeded", result):
             await self._store.append_event(
                 run.id, "state", f"{call.name} finished", entry.id
             )
         self._last_polled.pop(entry.id, None)
 
     async def _poll(
-        self, run: Run, call: engine.PendingCall, started_at: datetime
+        self, run: RunRow, call: engine.PendingCall, started_at: datetime
     ) -> JsonValue | None:
         # Guidance from a person answers whatever the run is waiting on.
         guidance = await self._store.claim_guidance(run.id)
@@ -245,7 +251,7 @@ class Orchestrator:
             raise RuntimeError(f"wait {call.name} in run {run.id} has no poll")
         return await asyncio.to_thread(call.poll, started_at)
 
-    async def _check_running_step(self, step_run: StepRun) -> None:
+    async def _check_running_step(self, step_run: JournalRow) -> None:
         state = await self._runner.step_state(step_run.id)
         if state is ContainerState.RUNNING:
             limit = timedelta(minutes=self._config.step_timeout_minutes)
@@ -263,11 +269,11 @@ class Orchestrator:
                 step_run, "step container exited without reporting a result"
             )
 
-    async def _fail_step(self, step_run: StepRun, error: str) -> None:
+    async def _fail_step(self, step_run: JournalRow, error: str) -> None:
         # The run carries on: the next replay raises StepFailed in the
         # workflow, which may catch it. False means the step posted a result
         # first; the next tick acts on it.
-        if await self._store.finish_step_run(step_run.id, "failed", error=error):
+        if await self._store.finish_journal_row(step_run.id, "failed", error=error):
             await self._store.append_event(
                 step_run.run_id,
                 "state",
@@ -275,16 +281,16 @@ class Orchestrator:
                 step_run.id,
             )
 
-    async def _reload(self, step_run: StepRun) -> StepRun:
-        current = await self._store.get_step_run(step_run.id)
+    async def _reload(self, step_run: JournalRow) -> JournalRow:
+        current = await self._store.get_journal_row(step_run.id)
         if current is None:
             raise RuntimeError(f"step run {step_run.id} disappeared from the store")
         return current
 
     async def _end_run(
         self,
-        run: Run,
-        last: StepRun | None,
+        run: RunRow,
+        last: JournalRow | None,
         status: TerminalRunStatus,
         error: str | None,
     ) -> None:
@@ -299,5 +305,5 @@ class Orchestrator:
         await self._store.append_event(run.id, "state", message)
 
 
-def _label(step_run: StepRun) -> str:
+def _label(step_run: JournalRow) -> str:
     return f"step {step_run.name}" if step_run.kind == "step" else step_run.name

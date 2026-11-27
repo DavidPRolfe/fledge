@@ -68,7 +68,7 @@ Shipped extensions:
 
 - Trigger: `GitHubIssues` (open issues in one repo carrying a configured label).
 - Steps: `clone_repo` (`fledge.steps`) and `mark_ready` (`fledge.github`).
-- Checks: `command` (`fledge.steps`), `Agent.approves`, and the waits
+- Checks: `command` (`fledge.checks`), `Agent.approves`, and the waits
   `checks_green` and `merged` (`fledge.github`).
 - Pull request calls: `open_pull_request` and `push` (`fledge.github`), each an
   agent prompt followed by a verifying step.
@@ -497,7 +497,7 @@ class StepContext(Protocol):
     def log(self, message: str) -> None: ...
     def agent_event(self, message: str) -> None: ...
     def claim_guidance(self) -> list[str]: ...
-    def agent(self, name: str) -> Agent: ...
+    def harness(self, agent: str) -> Harness: ...
 ```
 
 A workflow calls `changed_files(repo)`, without the context. Every parameter
@@ -620,7 +620,7 @@ section 2.
 One image runs everywhere. `fledge serve` is the control plane and
 `fledge step-exec` is the step container's command. Configuration is
 environment variables only: `DATABASE_URL`, the step secrets, and the
-`FLEDGE_*` settings in `fledge.settings.Settings`. The defaults suit the
+`FLEDGE_*` settings in `fledge.control.settings.Settings`. The defaults suit the
 bundled `compose.yaml`:
 
 ```

@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from pydantic import JsonValue, TypeAdapter
 
-from fledge.core import Harness, Turn
 from fledge.harnesses import ClaudeCode, Codex
+from fledge.harnesses.base import Harness, Turn
 
 FAKE_CLI = """\
 #!{python}

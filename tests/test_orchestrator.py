@@ -5,7 +5,7 @@ from uuid import UUID
 import pytest
 from pydantic import JsonValue
 
-from fledge import core
+from fledge import core, engine
 from fledge.checks import (
     Passed,
     Pending,
@@ -16,12 +16,13 @@ from fledge.checks import (
     until,
     wait,
 )
-from fledge.core import Sandbox, Service, StepContext, Trigger, WorkItem
+from fledge.control.orchestrator import Orchestrator
+from fledge.control.runner.base import ContainerState, StepSpec
+from fledge.control.settings import Settings
+from fledge.control.store import JournalRow, RunRow, Store, WorkflowRef, hash_token
+from fledge.core import Sandbox, Service, StepContext, WorkItem
 from fledge.engine import StepFailed, ref, step, workflow
-from fledge.orchestrator import Orchestrator
-from fledge.runner.base import ContainerState, StepSpec
-from fledge.settings import Settings
-from fledge.store import Run, StepRun, Store, WorkflowRef, hash_token
+from fledge.triggers import Trigger
 from fledge.wire import API_URL_ENV, READY_PORTS_ENV, STEP_RUN_ID_ENV, STEP_TOKEN_ENV
 
 pytestmark = pytest.mark.anyio
@@ -102,7 +103,7 @@ def sandboxed(run: core.Run) -> None:
 WORKFLOWS = {wf.name: wf for wf in [two_steps, tolerant, until_green, sandboxed]}
 
 
-async def load_workflow(snapshot_hash: str, name: str) -> core.Workflow:
+async def load_workflow(snapshot_hash: str, name: str) -> engine.Workflow:
     assert snapshot_hash == SNAPSHOT_HASH
     return WORKFLOWS[name]
 
@@ -177,8 +178,8 @@ def orchestrator(store: Store, runner: FakeRunner, **config: object) -> Orchestr
 
 
 async def make_run(
-    store: Store, workflow: core.Workflow, external_id: str = "1"
-) -> Run:
+    store: Store, workflow: engine.Workflow, external_id: str = "1"
+) -> RunRow:
     work = WorkItem(
         external_id=external_id,
         title="Fix it",
@@ -191,37 +192,37 @@ async def make_run(
     )
 
 
-async def get_run(store: Store, run: Run) -> Run:
+async def get_run(store: Store, run: RunRow) -> RunRow:
     current = await store.get_run(run.id)
     assert current is not None
     return current
 
 
-async def journal(store: Store, run: Run) -> list[StepRun]:
-    return await store.list_step_runs(run.id)
+async def journal(store: Store, run: RunRow) -> list[JournalRow]:
+    return await store.list_journal(run.id)
 
 
-async def latest_call(store: Store, run: Run) -> StepRun:
+async def latest_call(store: Store, run: RunRow) -> JournalRow:
     return (await journal(store, run))[-1]
 
 
 async def report(
     store: Store,
     runner: FakeRunner,
-    step_run: StepRun,
+    step_run: JournalRow,
     result: JsonValue = None,
     *,
     error: str | None = None,
 ) -> None:
     """Post a result as the internal API would, then let the container exit."""
     if error is None:
-        assert await store.finish_step_run(step_run.id, "succeeded", result)
+        assert await store.finish_journal_row(step_run.id, "succeeded", result)
     else:
-        assert await store.finish_step_run(step_run.id, "failed", error=error)
+        assert await store.finish_journal_row(step_run.id, "failed", error=error)
     runner.states[step_run.id] = ContainerState.EXITED
 
 
-async def timeline(store: Store, run: Run) -> list[str]:
+async def timeline(store: Store, run: RunRow) -> list[str]:
     return [event.message for event in await store.list_events(run.id)]
 
 
@@ -336,7 +337,7 @@ async def test_step_that_times_out_or_loses_its_container_fails(
 
     await orch.tick()
 
-    current = await store.get_step_run(step_run.id)
+    current = await store.get_journal_row(step_run.id)
     assert current is not None
     assert (current.status, current.error) == ("failed", error)
     assert runner.states.get(step_run.id) is not ContainerState.RUNNING
@@ -372,13 +373,13 @@ async def test_result_posted_just_before_exit_is_honoured(
 
     async def post_then_exit(step_run_id: UUID) -> None:
         # The result lands after the tick listed the step runs as running.
-        assert await store.finish_step_run(step_run_id, "succeeded", "fledge/1")
+        assert await store.finish_journal_row(step_run_id, "succeeded", "fledge/1")
         runner.states[step_run_id] = ContainerState.EXITED
 
     runner.before_state = post_then_exit
     await orch.tick()
 
-    current = await store.get_step_run(step_run.id)
+    current = await store.get_journal_row(step_run.id)
     assert current is not None
     assert (current.status, current.result) == ("succeeded", "fledge/1")
 

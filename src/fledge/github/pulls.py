@@ -6,7 +6,6 @@ real client from GITHUB_TOKEN.
 """
 
 import logging
-import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -29,8 +28,8 @@ from fledge.checks import (
 )
 from fledge.core import Repo, StepContext
 from fledge.engine import step
-from fledge.git import GITHUB_TOKEN_ENV, git
-from fledge.github.issues import API_URL, MissingTokenError
+from fledge.git import git
+from fledge.github import api
 
 logger = logging.getLogger(__name__)
 
@@ -64,11 +63,6 @@ class PullRequest:
     number: int
     url: str
     """The pull request's page on GitHub."""
-
-
-class _User(BaseModel):
-    login: str
-    type: str
 
 
 class _Head(BaseModel):
@@ -141,14 +135,14 @@ class _CombinedStatusPage(BaseModel):
 
 
 class _Review(BaseModel):
-    user: _User
+    user: api.User
     body: str | None
     state: str
     submitted_at: datetime | None
 
 
 class _ReviewComment(BaseModel):
-    user: _User
+    user: api.User
     body: str
     path: str
     line: int | None
@@ -157,7 +151,7 @@ class _ReviewComment(BaseModel):
 
 
 class _IssueComment(BaseModel):
-    user: _User
+    user: api.User
     body: str
     created_at: datetime
 
@@ -186,21 +180,10 @@ def _github_repo(repo_url: str) -> tuple[str, str]:
     return match["owner"], match["repo"]
 
 
-def _token() -> str:
-    token = os.environ.get(GITHUB_TOKEN_ENV)
-    if not token:
-        raise MissingTokenError(f"{GITHUB_TOKEN_ENV} is not set")
-    return token
-
-
 def github_client(token: str) -> httpx.Client:
     return httpx.Client(
-        base_url=API_URL,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        base_url=api.API_URL,
+        headers=api.headers(token),
     )
 
 
@@ -287,7 +270,7 @@ def find_pull_request(client: httpx.Client, repo: Repo) -> PullRequest:
 
 @step
 def verify_opened(ctx: StepContext, repo: Repo) -> PullRequest:
-    token = _token()
+    token = api.token()
     check_pushed(repo, token)
     with github_client(token) as client:
         pull = find_pull_request(client, repo)
@@ -297,7 +280,7 @@ def verify_opened(ctx: StepContext, repo: Repo) -> PullRequest:
 
 @step
 def verify_pushed(ctx: StepContext, repo: Repo) -> None:
-    check_pushed(repo, _token())
+    check_pushed(repo, api.token())
     ctx.log(f"verified {repo.branch} is pushed")
 
 
@@ -340,7 +323,7 @@ def ready_for_review(client: httpx.Client, pr: PullRequest) -> None:
 
 @step
 def mark_ready(ctx: StepContext, pr: PullRequest) -> None:
-    with github_client(_token()) as client:
+    with github_client(api.token()) as client:
         ready_for_review(client, pr)
     ctx.log(f"marked {pr.url} ready for review")
 
@@ -491,10 +474,10 @@ def ci_verdict(
 
 def _review_feedback(
     client: httpx.Client, pr: PullRequest, since: datetime
-) -> list[tuple[datetime, _User, str]]:
+) -> list[tuple[datetime, api.User, str]]:
     owner, name = _github_repo(pr.repo.url)
     pull = f"/repos/{owner}/{name}/pulls/{pr.number}"
-    found: list[tuple[datetime, _User, str]] = []
+    found: list[tuple[datetime, api.User, str]] = []
     for page in _get_pages(client, f"{pull}/reviews", {}):
         for review in _REVIEWS.validate_json(page):
             body = (review.body or "").strip()
@@ -536,7 +519,7 @@ def review_verdict(client: httpx.Client, pr: PullRequest, since: datetime) -> Ve
         return Stopped()
     response = client.get("/user")
     response.raise_for_status()
-    own_login = _User.model_validate_json(response.content).login
+    own_login = api.User.model_validate_json(response.content).login
     human = sorted(
         (
             (at, user.login, body)
@@ -554,12 +537,12 @@ def review_verdict(client: httpx.Client, pr: PullRequest, since: datetime) -> Ve
 def checks_green(ctx: WaitContext, pr: PullRequest) -> Verdict:
     """Passes when the pull request's checks pass; feedback when one fails."""
     # The one place a check reads the real clock: waits may, workflow bodies may not.
-    with github_client(_token()) as client:
+    with github_client(api.token()) as client:
         return ci_verdict(client, pr, ctx.started_at, datetime.now(UTC))
 
 
 @wait
 def merged(ctx: WaitContext, pr: PullRequest) -> Verdict:
     """Passes when the pull request is merged; feedback for reviews and failures."""
-    with github_client(_token()) as client:
+    with github_client(api.token()) as client:
         return review_verdict(client, pr, ctx.since)

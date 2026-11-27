@@ -35,7 +35,7 @@ class WorkflowRef:
 
 
 @dataclass(frozen=True)
-class Run:
+class RunRow:
     id: UUID
     external_id: str
     origin: RunOrigin
@@ -65,7 +65,7 @@ class Run:
 
 
 @dataclass(frozen=True)
-class StepRun:
+class JournalRow:
     """One call a workflow made: a row of the run's journal."""
 
     id: UUID
@@ -113,8 +113,8 @@ def _columns(row_type: type) -> sql.Composed:
     return sql.SQL(", ").join(sql.Identifier(field.name) for field in fields(row_type))
 
 
-_RUN = _columns(Run)
-_STEP_RUN = _columns(StepRun)
+_RUN = _columns(RunRow)
+_JOURNAL_ROW = _columns(JournalRow)
 _EVENT = _columns(Event)
 _GUIDANCE = _columns(Guidance)
 _FILES = TypeAdapter(dict[str, str])
@@ -168,10 +168,10 @@ class Store:
             raise LookupError(f"no workflow snapshot {snapshot_hash}")
         return _FILES.validate_python(row[0])
 
-    async def create_manual_run(self, workflow: WorkflowRef, work: WorkItem) -> Run:
+    async def create_manual_run(self, workflow: WorkflowRef, work: WorkItem) -> RunRow:
         async with (
             self._pool.connection() as conn,
-            conn.cursor(row_factory=class_row(Run)) as cur,
+            conn.cursor(row_factory=class_row(RunRow)) as cur,
         ):
             await cur.execute(
                 sql.SQL(
@@ -193,7 +193,7 @@ class Store:
 
     async def create_polled_run(
         self, workflow: WorkflowRef, work: WorkItem
-    ) -> Run | None:
+    ) -> RunRow | None:
         """Insert a pending run unless any run exists for (workflow, external_id).
 
         Returns None when one already exists.
@@ -201,7 +201,7 @@ class Store:
         async with (
             self._pool.connection() as conn,
             conn.transaction(),
-            conn.cursor(row_factory=class_row(Run)) as cur,
+            conn.cursor(row_factory=class_row(RunRow)) as cur,
         ):
             # runs has no unique key on (workflow, external_id) because manual
             # launches may repeat an item, so concurrent polled inserts for the
@@ -235,21 +235,21 @@ class Store:
             )
             return await cur.fetchone()
 
-    async def get_run(self, run_id: UUID) -> Run | None:
+    async def get_run(self, run_id: UUID) -> RunRow | None:
         async with (
             self._pool.connection() as conn,
-            conn.cursor(row_factory=class_row(Run)) as cur,
+            conn.cursor(row_factory=class_row(RunRow)) as cur,
         ):
             await cur.execute(
                 sql.SQL("SELECT {} FROM runs WHERE id = %s").format(_RUN), (run_id,)
             )
             return await cur.fetchone()
 
-    async def list_runs(self, limit: int = 100) -> list[Run]:
+    async def list_runs(self, limit: int = 100) -> list[RunRow]:
         """Newest first."""
         async with (
             self._pool.connection() as conn,
-            conn.cursor(row_factory=class_row(Run)) as cur,
+            conn.cursor(row_factory=class_row(RunRow)) as cur,
         ):
             await cur.execute(
                 sql.SQL(
@@ -259,11 +259,11 @@ class Store:
             )
             return await cur.fetchall()
 
-    async def list_runs_with_status(self, status: RunStatus) -> list[Run]:
+    async def list_runs_with_status(self, status: RunStatus) -> list[RunRow]:
         """Oldest first, so pending runs come out in the order they arrived."""
         async with (
             self._pool.connection() as conn,
-            conn.cursor(row_factory=class_row(Run)) as cur,
+            conn.cursor(row_factory=class_row(RunRow)) as cur,
         ):
             await cur.execute(
                 sql.SQL(
@@ -305,7 +305,7 @@ class Store:
             )
             return cur.rowcount == 1
 
-    async def create_step_run(  # noqa: PLR0913 - one argument per column
+    async def create_journal_row(  # noqa: PLR0913 - one argument per column
         self,
         run_id: UUID,
         step_index: int,
@@ -315,47 +315,47 @@ class Store:
         function: str,
         args: dict[str, JsonValue],
         token_hash: str,
-    ) -> StepRun:
+    ) -> JournalRow:
         async with (
             self._pool.connection() as conn,
-            conn.cursor(row_factory=class_row(StepRun)) as cur,
+            conn.cursor(row_factory=class_row(JournalRow)) as cur,
         ):
             await cur.execute(
                 sql.SQL(
                     "INSERT INTO step_runs "
                     "(run_id, step_index, kind, name, function, args, token_hash) "
                     "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING {}"
-                ).format(_STEP_RUN),
+                ).format(_JOURNAL_ROW),
                 (run_id, step_index, kind, name, function, Jsonb(args), token_hash),
             )
             return _one(await cur.fetchone())
 
-    async def get_step_run(self, step_run_id: UUID) -> StepRun | None:
+    async def get_journal_row(self, step_run_id: UUID) -> JournalRow | None:
         async with (
             self._pool.connection() as conn,
-            conn.cursor(row_factory=class_row(StepRun)) as cur,
+            conn.cursor(row_factory=class_row(JournalRow)) as cur,
         ):
             await cur.execute(
-                sql.SQL("SELECT {} FROM step_runs WHERE id = %s").format(_STEP_RUN),
+                sql.SQL("SELECT {} FROM step_runs WHERE id = %s").format(_JOURNAL_ROW),
                 (step_run_id,),
             )
             return await cur.fetchone()
 
-    async def list_step_runs(self, run_id: UUID) -> list[StepRun]:
+    async def list_journal(self, run_id: UUID) -> list[JournalRow]:
         """In call order."""
         async with (
             self._pool.connection() as conn,
-            conn.cursor(row_factory=class_row(StepRun)) as cur,
+            conn.cursor(row_factory=class_row(JournalRow)) as cur,
         ):
             await cur.execute(
                 sql.SQL(
                     "SELECT {} FROM step_runs WHERE run_id = %s ORDER BY step_index"
-                ).format(_STEP_RUN),
+                ).format(_JOURNAL_ROW),
                 (run_id,),
             )
             return await cur.fetchall()
 
-    async def finish_step_run(
+    async def finish_journal_row(
         self,
         step_run_id: UUID,
         status: TerminalStepStatus,

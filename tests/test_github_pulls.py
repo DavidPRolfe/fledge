@@ -13,7 +13,8 @@ from pydantic import JsonValue
 from fledge import engine
 from fledge.agents import Agent
 from fledge.checks import Feedback, FeedbackItem, Passed, Pending, Stopped, until
-from fledge.core import Repo, Run, Turn, TurnResult, WorkItem
+from fledge.control.store import JournalRow
+from fledge.core import Repo, Run, WorkItem
 from fledge.engine import PendingCall, workflow
 from fledge.github import (
     GitHubIssues,
@@ -25,8 +26,8 @@ from fledge.github import (
     pulls,
     push,
 )
-from fledge.github.issues import MissingTokenError
-from fledge.store import StepRun
+from fledge.github.api import MissingTokenError
+from fledge.harnesses.base import Harness, Turn, TurnResult
 
 CREDENTIAL = "ghp_test_credential"
 REPO = "/repos/acme/api"
@@ -110,8 +111,8 @@ class FakeContext:
     def claim_guidance(self) -> list[str]:
         return []
 
-    def agent(self, name: str) -> Agent:
-        raise KeyError(name)
+    def harness(self, agent: str) -> Harness:
+        raise KeyError(agent)
 
 
 def push_branch(repo: Repo) -> None:
@@ -826,9 +827,9 @@ WORK = WorkItem(
 )
 
 
-def entry(run: Run, call: PendingCall, result: JsonValue) -> StepRun:
+def entry(run: Run, call: PendingCall, result: JsonValue) -> JournalRow:
     at = SINCE + timedelta(minutes=call.position)
-    return StepRun(
+    return JournalRow(
         id=uuid4(),
         run_id=run.id,
         step_index=call.position,
@@ -865,7 +866,7 @@ def test_open_pull_request_and_push_prompt_the_agent_then_verify(
         {"message": "Pushed.", "structured": None},
         None,
     ]
-    journal: list[StepRun] = []
+    journal: list[JournalRow] = []
     calls: list[PendingCall] = []
     for result in results:
         outcome = engine.replay(publish, run, SINCE, journal)

@@ -10,8 +10,8 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 from pydantic import JsonValue
 
-from fledge.store import Store
-from fledge.web.schemas import RunOut, run_detail
+from fledge.control.store import Store
+from fledge.control.web.schemas import RunOut, run_detail
 
 _TEMPLATES = Path(__file__).parent / "templates"
 

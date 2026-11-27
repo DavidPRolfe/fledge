@@ -4,9 +4,9 @@ import asyncio
 import logging
 from collections.abc import Mapping
 
-from fledge.settings import Settings
-from fledge.store import Run, Store
-from fledge.workflows import TriggerBinding
+from fledge.control.settings import Settings
+from fledge.control.snapshots import TriggerBinding
+from fledge.control.store import RunRow, Store
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class Poller:
                 logger.exception("polling the trigger of workflow %r failed", name)
 
     async def _poll_trigger(
-        self, name: str, binding: TriggerBinding, runs: list[Run]
+        self, name: str, binding: TriggerBinding, runs: list[RunRow]
     ) -> None:
         for item in await binding.trigger.poll():
             run = await self._store.create_polled_run(binding.workflow, item)
