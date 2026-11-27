@@ -24,6 +24,16 @@ _GITHUB_REPO = re.compile(r"[\w.-]+/[\w.-]+")
 
 # Braces the written file's own IMPLEMENT template needs are doubled here.
 _GITHUB_WORKFLOW = '''\
+"""The workflow runs once per labelled issue. An agent implements the issue,
+opens a pull request, and handles CI failures and review comments until it is
+merged.
+
+Each step runs in its own container. To resume a run, Fledge calls this
+function again from the top and reuses the results of steps that already ran,
+so keep I/O and clock reads inside steps. Do not catch BaseException: Fledge
+pauses a run by raising one.
+"""
+
 from fledge import Agent, Run, until, workflow
 from fledge.github import (
     GitHubIssues,
@@ -57,12 +67,14 @@ def {name}(run: Run) -> None:
     repo = clone_repo(run.work.repo_url)
     implementer.prompt(IMPLEMENT.format(work=run.work), repo)
 
+    # If CI is still failing after 5 fixes, the run fails.
     pr = open_pull_request(implementer, repo, draft=True)
     for feedback in until(checks_green(pr), max_rounds=5):
         implementer.prompt(feedback, repo)
         push(implementer, pr)
     mark_ready(pr)
 
+    # If the pull request is closed without merging, the run is cancelled.
     for feedback in until(merged(pr), max_rounds=20):
         implementer.prompt(feedback, repo)
         push(implementer, pr)
