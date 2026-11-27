@@ -68,7 +68,9 @@ dev = Sandbox(
             ready_port=5432,
         )
     ],
-    env={"FLEDGE_TEST_DATABASE_URL": "postgresql://postgres:fledge@postgres/postgres"},
+    env={
+        "FLEDGE_TEST_DATABASE_URL": "postgresql://postgres:fledge@postgres/postgres"
+    },
 )
 
 implementer = Agent("implementer", ClaudeCode(), sandbox=dev)
@@ -127,7 +129,8 @@ A step is a function that runs in its own container:
 
 ```python
 @step
-def docs_only(ctx: StepContext, repo: Repo) -> bool: ...
+def docs_only(ctx: StepContext, repo: Repo) -> bool:
+    ...
 ```
 
 - Called from a workflow, `docs_only(repo)` looks like an ordinary call.
@@ -170,9 +173,7 @@ class Agent:
     @overload
     def prompt(self, prompt: str | Feedback, repo: Repo) -> str: ...
     @overload
-    def prompt[T](
-        self, prompt: str | Feedback, repo: Repo, *, returns: type[T]
-    ) -> T: ...
+    def prompt[T](self, prompt: str | Feedback, repo: Repo, *, returns: type[T]) -> T: ...
 
     def approves(self, prompt: str, repo: Repo) -> Check: ...
 ```
@@ -257,11 +258,13 @@ A check is a value describing something to evaluate. There are two kinds:
 
 ```python
 @check
-def tests_pass(ctx: StepContext, repo: Repo) -> Passed | Feedback: ...
+def tests_pass(ctx: StepContext, repo: Repo) -> Passed | Feedback:
+    ...
 
 
 @wait
-def release_approved(ctx: WaitContext, ticket: str) -> Verdict: ...
+def release_approved(ctx: WaitContext, ticket: str) -> Verdict:
+    ...
 ```
 
 - `@check` runs in a container, like a step.
@@ -311,9 +314,7 @@ workflow still names the moments it happens, so that the reviewer gate can
 sit before the pull request exists.
 
 ```python
-def open_pull_request(
-    agent: Agent, repo: Repo, *, draft: bool = False
-) -> PullRequest: ...
+def open_pull_request(agent: Agent, repo: Repo, *, draft: bool = False) -> PullRequest: ...
 def push(agent: Agent, pr: PullRequest) -> None: ...
 def mark_ready(pr: PullRequest) -> None: ...
 ```
