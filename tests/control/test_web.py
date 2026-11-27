@@ -167,6 +167,7 @@ async def test_get_run_includes_steps_and_guidance(
         "/api/runs/{id}",
         "/api/runs/{id}/events",
         "/runs/{id}",
+        "/runs/{id}/live",
     ],
 )
 async def test_unknown_run_is_404(client: httpx.AsyncClient, path: str) -> None:
@@ -451,3 +452,89 @@ async def test_run_page_hides_cancel_for_finished_run(
     await store.finish_run(run.id, "succeeded")
     response = await client.get(f"/runs/{run.id}")
     assert 'id="cancel" type="button" hidden>' in response.text
+
+
+async def test_launch_form_redirects_to_the_new_run(
+    client: httpx.AsyncClient, store: Store
+) -> None:
+    response = await client.post("/runs", data={"workflow": "ticket_to_pr", "ref": "7"})
+    assert response.status_code == 201
+    [run] = await store.list_runs()
+    assert response.headers["HX-Redirect"] == f"/runs/{run.id}"
+
+
+@pytest.mark.parametrize(
+    ("form", "message"),
+    [
+        ({"workflow": "ticket_to_pr", "ref": "99"}, "no issue 99"),
+        ({"workflow": "nope", "ref": "7"}, "unknown workflow 'nope'"),
+        ({"workflow": "ticket_to_pr"}, "ref: Field required"),
+    ],
+)
+async def test_launch_form_error_is_html_to_show(
+    client: httpx.AsyncClient, store: Store, form: dict[str, str], message: str
+) -> None:
+    response = await client.post("/runs", data=form)
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.text == message
+    assert await store.list_runs() == []
+
+
+async def test_cancel_button_requests_cancel_then_reports_finished(
+    client: httpx.AsyncClient, store: Store
+) -> None:
+    run = await make_run(store)
+    response = await client.post(f"/runs/{run.id}/cancel")
+    assert response.status_code == 200
+    assert response.headers["HX-Trigger"] == "refresh"
+    refreshed = await store.get_run(run.id)
+    assert refreshed is not None
+    assert refreshed.cancel_requested
+
+    await store.finish_run(run.id, "cancelled")
+    response = await client.post(f"/runs/{run.id}/cancel")
+    assert response.status_code == 409
+    assert response.text == "run has already finished"
+
+
+async def test_guidance_form_adds_guidance_and_rejects_blank(
+    client: httpx.AsyncClient, store: Store
+) -> None:
+    run = await make_run(store)
+    response = await client.post(f"/runs/{run.id}/guidance", data={"body": "   "})
+    assert response.status_code == 422
+    assert "body:" in response.text
+    assert await store.list_guidance(run.id) == []
+
+    response = await client.post(f"/runs/{run.id}/guidance", data={"body": "use tabs"})
+    assert response.status_code == 201
+    assert response.headers["HX-Trigger"] == "refresh"
+    [guidance] = await store.list_guidance(run.id)
+    assert guidance.body == "use tabs"
+
+
+async def test_live_fragment_appends_new_events_and_polls_while_active(
+    client: httpx.AsyncClient, store: Store
+) -> None:
+    run = await make_run(store)
+    first, second = await store.append_events(run.id, [("log", "a"), ("log", "<b>")])
+
+    page = (await client.get(f"/runs/{run.id}")).text
+    assert f'hx-get="/runs/{run.id}/live?after={second.id}"' in page
+    assert "[log] a</div>" in page
+
+    response = await client.get(f"/runs/{run.id}/live?after={first.id}")
+    assert response.status_code == 200
+    live = response.text
+    assert "every 2s" in live
+    assert f"/live?after={second.id}" in live
+    assert '<div hx-swap-oob="beforeend:#events"><div>' in live
+    assert "[log] &lt;b&gt;</div>" in live
+    assert "[log] a</div>" not in live
+    assert '<table id="steps" hx-swap-oob="true">' in live
+
+    await store.finish_run(run.id, "succeeded")
+    live = (await client.get(f"/runs/{run.id}/live?after={second.id}")).text
+    assert "every 2s" not in live
+    assert 'hx-trigger="refresh from:body"' in live

@@ -21,7 +21,7 @@ from fledge.control.web.schemas import (
 )
 
 
-async def _launch(
+async def launch_run(
     store: Store, workflows: Mapping[str, TriggerBinding], body: LaunchIn
 ) -> RunOut:
     # An unknown workflow name is a bad request body, like a bad ref, so both
@@ -61,7 +61,7 @@ def public_routes(store: Store, workflows: Mapping[str, TriggerBinding]) -> APIR
 
     @router.post("/runs", status_code=status.HTTP_201_CREATED)
     async def launch(body: LaunchIn) -> RunOut:
-        return await _launch(store, workflows, body)
+        return await launch_run(store, workflows, body)
 
     @router.post("/runs/{run_id}/cancel")
     async def cancel(run_id: UUID) -> RunOut:

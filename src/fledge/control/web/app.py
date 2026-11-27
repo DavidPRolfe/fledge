@@ -13,5 +13,5 @@ def create_app(store: Store, workflows: Mapping[str, TriggerBinding]) -> FastAPI
     app = FastAPI(title="fledge")
     app.include_router(public_routes(store, workflows))
     app.include_router(internal_routes(store))
-    app.include_router(page_routes(store, sorted(workflows)))
+    app.include_router(page_routes(store, workflows))
     return app
