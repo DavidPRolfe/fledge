@@ -1,10 +1,9 @@
 """Writes the starter workflow for `fledge init`."""
 
 import json
-import re
 from pathlib import Path
 
-_GITHUB_REPO = re.compile(r"[\w.-]+/[\w.-]+")
+from fledge.github import GitHubIssues
 
 # Braces the written file's own IMPLEMENT template needs are doubled here.
 _GITHUB_WORKFLOW = '''\
@@ -43,7 +42,7 @@ on the current branch. Do not push and do not open a pull request yet: you
 will be asked to. End with a short summary of what you changed and why.
 """
 
-implementer = Agent({agent}, ClaudeCode())
+implementer = Agent("implementer", ClaudeCode())
 
 
 @workflow(trigger=GitHubIssues(repo={repo}, label={label}))
@@ -78,16 +77,10 @@ def write_github_workflow(directory: Path, name: str, repo: str, label: str) -> 
     """
     if not name.isidentifier():
         raise ValueError(f"name must be a Python identifier, got {name!r}")
-    if not _GITHUB_REPO.fullmatch(repo):
-        raise ValueError(f"repo must be 'owner/name', got {repo!r}")
-    # GitHub takes the labels filter as a comma-separated list.
-    if not label or "," in label:
-        raise ValueError(f"label must be non-empty without commas, got {label!r}")
+    # Raises ValueError for a repo or label the written trigger would refuse.
+    GitHubIssues(repo, label)
     source = _GITHUB_WORKFLOW.format(
         name=name,
-        # Agent names are unique across the workflows directory, and init can
-        # write several workflows into one.
-        agent=_python_str(f"{name}_implementer"),
         repo=_python_str(repo),
         label=_python_str(label),
     )

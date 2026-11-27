@@ -19,7 +19,7 @@ from fledge.checks import (
 from fledge.control.orchestrator import Orchestrator
 from fledge.control.runner.base import ContainerState, StepSpec
 from fledge.control.settings import Settings
-from fledge.control.store import JournalRow, RunRow, Store, WorkflowRef, hash_token
+from fledge.control.store import CallRow, RunRow, Store, WorkflowRef, hash_token
 from fledge.core import Sandbox, Service, StepContext, WorkItem
 from fledge.engine import StepFailed, ref, step, workflow
 from fledge.triggers import Trigger
@@ -198,27 +198,27 @@ async def get_run(store: Store, run: RunRow) -> RunRow:
     return current
 
 
-async def journal(store: Store, run: RunRow) -> list[JournalRow]:
+async def journal(store: Store, run: RunRow) -> list[CallRow]:
     return await store.list_journal(run.id)
 
 
-async def latest_call(store: Store, run: RunRow) -> JournalRow:
+async def latest_call(store: Store, run: RunRow) -> CallRow:
     return (await journal(store, run))[-1]
 
 
 async def report(
     store: Store,
     runner: FakeRunner,
-    step_run: JournalRow,
+    step_run: CallRow,
     result: JsonValue = None,
     *,
     error: str | None = None,
 ) -> None:
     """Post a result as the internal API would, then let the container exit."""
     if error is None:
-        assert await store.finish_journal_row(step_run.id, "succeeded", result)
+        assert await store.finish_call(step_run.id, "succeeded", result)
     else:
-        assert await store.finish_journal_row(step_run.id, "failed", error=error)
+        assert await store.finish_call(step_run.id, "failed", error=error)
     runner.states[step_run.id] = ContainerState.EXITED
 
 
@@ -236,7 +236,7 @@ async def test_run_passes_results_between_steps_to_success(
     assert (await get_run(store, run)).status == "running"
     assert runner.workspaces == {run.id}
     first = await latest_call(store, run)
-    assert (first.step_index, first.kind, first.name) == (0, "step", "make_branch")
+    assert (first.position, first.kind, first.name) == (0, "step", "make_branch")
     assert first.function == ref(make_branch.fn)
     assert first.args == {"issue": "42"}
 
@@ -246,7 +246,7 @@ async def test_run_passes_results_between_steps_to_success(
     await report(store, runner, first, "fledge/42")
     await orch.tick()
     second = await latest_call(store, run)
-    assert (second.step_index, second.name, second.args) == (
+    assert (second.position, second.name, second.args) == (
         1,
         "open_pr",
         {"branch": "fledge/42"},
@@ -337,7 +337,7 @@ async def test_step_that_times_out_or_loses_its_container_fails(
 
     await orch.tick()
 
-    current = await store.get_journal_row(step_run.id)
+    current = await store.get_call(step_run.id)
     assert current is not None
     assert (current.status, current.error) == ("failed", error)
     assert runner.states.get(step_run.id) is not ContainerState.RUNNING
@@ -373,13 +373,13 @@ async def test_result_posted_just_before_exit_is_honoured(
 
     async def post_then_exit(step_run_id: UUID) -> None:
         # The result lands after the tick listed the step runs as running.
-        assert await store.finish_journal_row(step_run_id, "succeeded", "fledge/1")
+        assert await store.finish_call(step_run_id, "succeeded", "fledge/1")
         runner.states[step_run_id] = ContainerState.EXITED
 
     runner.before_state = post_then_exit
     await orch.tick()
 
-    current = await store.get_journal_row(step_run.id)
+    current = await store.get_call(step_run.id)
     assert current is not None
     assert (current.status, current.result) == ("succeeded", "fledge/1")
 
@@ -477,7 +477,7 @@ async def test_wait_is_polled_until_it_settles(
 
     await orch.tick()
     waiting = await latest_call(store, run)
-    assert (waiting.step_index, waiting.name, waiting.status) == (0, "ci", "running")
+    assert (waiting.position, waiting.name, waiting.status) == (0, "ci", "running")
     assert waiting.function == f"{__name__}:ci"
 
     VERDICTS.append(Passed())
@@ -558,7 +558,7 @@ async def test_guidance_during_a_wait_becomes_feedback(
     await report(store, runner, fixing)
     await orch.tick()
     second_wait = await latest_call(store, run)
-    assert (second_wait.step_index, second_wait.kind) == (2, "wait")
+    assert (second_wait.position, second_wait.kind) == (2, "wait")
 
     VERDICTS.append(Passed())
     await orch.tick()

@@ -5,8 +5,6 @@ in the Codex repository; they have not been checked against a live CLI here.
 """
 
 import json
-import os
-import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,7 +13,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
-from fledge.harnesses.base import Turn, TurnResult
+from fledge.harnesses.base import Turn, TurnResult, run_cli
 
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 
@@ -213,19 +211,9 @@ class Codex:
         ]
         if self.model is not None:
             argv += ["--model", self.model]
-        # Codex keeps its sessions under CODEX_HOME, so pointing it at
-        # state_dir lets a turn in a later container resume them.
-        env = {**os.environ, "CODEX_HOME": str(turn.state_dir)}
-
         progress = _Turn()
-        # The schema file goes outside the workdir so it never lands in a
-        # commit. stderr goes to a file so a chatty stderr cannot fill its pipe
-        # and stall the process while we block on stdout.
-        with (
-            tempfile.TemporaryDirectory() as scratch,
-            tempfile.TemporaryFile() as stdin,
-            tempfile.TemporaryFile() as stderr,
-        ):
+        # The schema file goes outside the workdir so it never lands in a commit.
+        with tempfile.TemporaryDirectory() as scratch:
             if turn.output_schema is not None:
                 schema_file = Path(scratch) / "output_schema.json"
                 schema = _strict_schema(dict(turn.output_schema))
@@ -237,29 +225,12 @@ class Codex:
             if turn.session_id is not None:
                 argv += ["resume", turn.session_id]
             argv.append("-")
-            stdin.write(turn.prompt.encode())
-            stdin.seek(0)
-            with subprocess.Popen(  # noqa: S603 -- fixed argv without a shell; the step container is the sandbox
+            # Codex keeps its sessions under CODEX_HOME, so pointing it at
+            # state_dir lets a turn in a later container resume them.
+            returncode, stderr_text = run_cli(
                 argv,
-                cwd=turn.workdir,
-                env=env,
-                stdin=stdin,
-                stdout=subprocess.PIPE,
-                stderr=stderr,
-                text=True,
-            ) as proc:
-                # Leaving the Popen block waits for the process, so a failure
-                # while reading must kill it first or that wait could hang.
-                try:
-                    assert proc.stdout is not None  # noqa: S101 -- guaranteed by stdout=PIPE; narrows the type
-                    for line in proc.stdout:
-                        if line.strip():
-                            _handle_line(line, progress, on_event)
-                except BaseException:
-                    proc.kill()
-                    raise
-            returncode = proc.returncode
-            stderr.seek(0)
-            stderr_text = stderr.read().decode(errors="replace").strip()
-
+                turn,
+                {"CODEX_HOME": str(turn.state_dir)},
+                lambda line: _handle_line(line, progress, on_event),
+            )
         return _turn_result(turn, progress, returncode, stderr_text)

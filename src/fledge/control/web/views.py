@@ -40,11 +40,11 @@ from markupsafe import Markup
 from pydantic import JsonValue
 
 from fledge.control.web.schemas import (
+    CallOut,
     EventOut,
     GuidanceOut,
     RunDetail,
     RunOut,
-    StepRunOut,
 )
 
 HTMX_URL = "https://unpkg.com/htmx.org@2.0.11/dist/htmx.min.js"
@@ -211,19 +211,19 @@ def _run_status(run: RunOut, after: int) -> Element:
     ]
 
 
-def _steps_table(steps: Sequence[StepRunOut], *, oob: bool) -> Element:
-    return table("#steps", hx_swap_oob="true" if oob else False)[
+def _calls_table(calls: Sequence[CallOut], *, oob: bool) -> Element:
+    return table("#calls", hx_swap_oob="true" if oob else False)[
         thead[tr[th["Call"], th["Kind"], th["Status"], th["Result"], th["Error"]]],
         tbody[
             (
                 tr[
-                    td[step.name],
-                    td[step.kind],
-                    td(".status")[step.status],
-                    td[_link_or_text(step.result)],
-                    td(".error")[step.error or ""],
+                    td[call.name],
+                    td[call.kind],
+                    td(".status")[call.status],
+                    td[_link_or_text(call.result)],
+                    td(".error")[call.error or ""],
                 ]
-                for step in steps
+                for call in calls
             )
         ],
     ]
@@ -267,7 +267,7 @@ def run_page(detail: RunDetail, events: Sequence[EventOut]) -> Element:
             _run_status(run, _cursor(events, 0)),
             p("#cancel-message.error"),
             h2["Calls"],
-            _steps_table(detail.steps, oob=False),
+            _calls_table(detail.calls, oob=False),
             h2["Guidance"],
             _guidance_list(detail.guidance, oob=False),
             form(
@@ -292,7 +292,7 @@ def run_live(detail: RunDetail, events: Sequence[EventOut], after: int) -> Node:
     """What the polling element receives: itself, plus out-of-band updates."""
     return fragment[
         _run_status(detail.run, _cursor(events, after)),
-        _steps_table(detail.steps, oob=True),
+        _calls_table(detail.calls, oob=True),
         _guidance_list(detail.guidance, oob=True),
         div(hx_swap_oob="beforeend:#events")[_event_lines(events)],
     ]

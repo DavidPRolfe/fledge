@@ -23,15 +23,8 @@ class _Issue(BaseModel):
     pull_request: _PullRequestLink | None = None
 
 
-class _IssueComment(BaseModel):
-    id: int
-    body: str
-    user: api.User
-    created_at: datetime
-
-
 _ISSUES = TypeAdapter(list[_Issue])
-_COMMENTS = TypeAdapter(list[_IssueComment])
+_COMMENTS = TypeAdapter(list[api.IssueComment])
 
 
 class GitHubIssuesTrigger:
@@ -51,26 +44,15 @@ class GitHubIssuesTrigger:
         repo: str,
         label: str,
         *,
-        transport: httpx.AsyncBaseTransport | None = None,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
-        owner, _, name = repo.partition("/")
-        if not owner or not name or "/" in name:
-            raise ValueError(f"repo must be 'owner/name', got {repo!r}")
-        # GitHub takes the labels filter as a comma-separated list, so a comma
-        # would silently turn one label into several.
-        if not label or "," in label:
-            raise ValueError(f"label must be non-empty without commas, got {label!r}")
         self._token = api.token()
         self._repo = repo
         self._label = label
         self._transport = transport
 
-    def _client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(
-            base_url=api.API_URL,
-            headers=api.headers(self._token),
-            transport=self._transport,
-        )
+    def _client(self) -> httpx.Client:
+        return api.client(self._token, self._transport)
 
     def _work_item(self, issue: _Issue) -> WorkItem:
         return WorkItem(
@@ -81,41 +63,26 @@ class GitHubIssuesTrigger:
             repo_url=f"https://github.com/{self._repo}.git",
         )
 
-    async def _get_pages(
-        self, client: httpx.AsyncClient, path: str, params: dict[str, str]
-    ) -> list[bytes]:
-        pages: list[bytes] = []
-        response = await client.get(path, params={**params, "per_page": "100"})
-        while True:
-            response.raise_for_status()
-            pages.append(response.content)
-            next_url = response.links.get("next", {}).get("url")
-            if next_url is None:
-                return pages
-            response = await client.get(next_url)
-
-    async def check(self) -> None:
+    def check(self) -> None:
         """Check GITHUB_TOKEN can read the repository and its issues and push.
 
         Pushing is checked because agents push and open pull requests with the
         same token; without it a run fails only after the agent has finished.
         Permission to open pull requests cannot be checked without opening one.
         """
-        async with self._client() as client:
-            repo = await client.get(f"/repos/{self._repo}")
-            issues = await client.get(
-                f"/repos/{self._repo}/issues", params={"per_page": "1"}
-            )
+        with self._client() as client:
+            repo = client.get(f"/repos/{self._repo}")
+            issues = client.get(f"/repos/{self._repo}/issues", params={"per_page": "1"})
         self._raise_for_access(repo, "see")
         self._raise_for_access(issues, "read the issues of")
-        async with httpx.AsyncClient(
+        with httpx.Client(
             base_url=api.GIT_URL,
             auth=httpx.BasicAuth("x-access-token", self._token),
             transport=self._transport,
         ) as client:
             # The ref advertisement git fetches before a push; GitHub answers
             # it only for credentials that may push.
-            push = await client.get(
+            push = client.get(
                 f"/{self._repo}.git/info/refs",
                 params={"service": "git-receive-pack"},
             )
@@ -137,9 +104,9 @@ class GitHubIssuesTrigger:
             )
         response.raise_for_status()
 
-    async def poll(self) -> list[WorkItem]:
-        async with self._client() as client:
-            pages = await self._get_pages(
+    def poll(self) -> list[WorkItem]:
+        with self._client() as client:
+            pages = api.get_pages(
                 client,
                 f"/repos/{self._repo}/issues",
                 {"state": "open", "labels": self._label},
@@ -151,7 +118,7 @@ class GitHubIssuesTrigger:
             if issue.pull_request is None
         ]
 
-    async def fetch(self, ref: str) -> WorkItem:
+    def fetch(self, ref: str) -> WorkItem:
         """The issue numbered `ref`, whatever its state or labels.
 
         Raises ValueError if `ref` is not a plain issue number or names a pull
@@ -159,28 +126,26 @@ class GitHubIssuesTrigger:
         """
         if not (ref.isascii() and ref.isdigit()):
             raise ValueError(f"GitHub issue ref must be an issue number, got {ref!r}")
-        async with self._client() as client:
-            response = await client.get(f"/repos/{self._repo}/issues/{int(ref)}")
+        with self._client() as client:
+            response = client.get(f"/repos/{self._repo}/issues/{int(ref)}")
         response.raise_for_status()
         issue = _Issue.model_validate_json(response.content)
         if issue.pull_request is not None:
             raise ValueError(f"{self._repo}#{ref} is a pull request, not an issue")
         return self._work_item(issue)
 
-    async def poll_guidance(
-        self, item_external_id: str, since: datetime
-    ) -> list[Comment]:
+    def poll_guidance(self, item_external_id: str, since: datetime) -> list[Comment]:
         """Comments created after `since` by accounts that are not bots.
 
         `since` must be timezone-aware: GitHub timestamps are UTC.
         """
         if since.tzinfo is None:
             raise ValueError("since must be timezone-aware")
-        async with self._client() as client:
+        with self._client() as client:
             # GitHub's `since` filters on updated_at, which still narrows the
             # transfer; created_at is checked below so edits to old comments
             # are not delivered again.
-            pages = await self._get_pages(
+            pages = api.get_pages(
                 client,
                 f"/repos/{self._repo}/issues/{int(item_external_id)}/comments",
                 {"since": since.isoformat()},
@@ -203,6 +168,15 @@ class GitHubIssues:
 
     repo: str
     label: str
+
+    def __post_init__(self) -> None:
+        api.check_repo(self.repo)
+        # GitHub takes the labels filter as a comma-separated list, so a comma
+        # would silently turn one label into several.
+        if not self.label or "," in self.label:
+            raise ValueError(
+                f"label must be non-empty without commas, got {self.label!r}"
+            )
 
     def start(self) -> GitHubIssuesTrigger:
         return GitHubIssuesTrigger(self.repo, self.label)

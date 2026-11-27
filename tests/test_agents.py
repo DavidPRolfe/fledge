@@ -10,7 +10,7 @@ from pydantic import JsonValue, TypeAdapter
 from fledge import engine
 from fledge.agents import Agent, Review, run_turn
 from fledge.checks import Feedback, FeedbackItem, until
-from fledge.control.store import JournalRow
+from fledge.control.store import CallRow
 from fledge.core import Repo, Run, Sandbox, WorkItem
 from fledge.engine import (
     Failed,
@@ -22,7 +22,7 @@ from fledge.engine import (
     workflow,
 )
 from fledge.github import GitHubIssues
-from fledge.harnesses.base import Harness, Turn, TurnResult
+from fledge.harnesses.base import Turn, TurnResult
 
 START = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 WORK = WorkItem(
@@ -48,18 +48,38 @@ class Decision:
     reason: str
 
 
-@dataclass
+# A step rebuilds the harness from its fields, so what the turns were asked is
+# recorded here rather than on the instance.
+TURNS: list[Turn] = []
+
+
+@dataclass(frozen=True)
 class FakeHarness:
-    """Answers each turn in order; records what it was asked."""
+    """Answers each turn in order; records what it was asked in TURNS."""
 
     structured: JsonValue = None
-    turns: list[Turn] = field(default_factory=list)
 
     def run_turn(self, turn: Turn, on_event: Callable[[str], None]) -> TurnResult:
-        self.turns.append(turn)
-        number = len(self.turns)
+        TURNS.append(turn)
+        number = len(TURNS)
         on_event(f"turn {number}")
         return TurnResult(f"session-{number}", f"done {number}", self.structured)
+
+
+def agent_json(name: str, structured: JsonValue = None) -> JsonValue:
+    return {
+        "name": name,
+        "harness_type": "test_agents:FakeHarness",
+        "harness": {"structured": structured},
+    }
+
+
+def local_harness() -> FakeHarness:
+    @dataclass(frozen=True)
+    class Local(FakeHarness):
+        pass
+
+    return Local()
 
 
 sandbox = Sandbox(env={"A": "1"})
@@ -75,11 +95,11 @@ def finished_at(position: int) -> datetime:
     return START + timedelta(minutes=position + 1)
 
 
-def entry(run: Run, call: PendingCall, result: JsonValue) -> JournalRow:
-    return JournalRow(
+def entry(run: Run, call: PendingCall, result: JsonValue) -> CallRow:
+    return CallRow(
         id=uuid4(),
         run_id=run.id,
-        step_index=call.position,
+        position=call.position,
         kind=call.kind,
         name=call.name,
         function=call.function,
@@ -98,7 +118,7 @@ def drive(
 ) -> tuple[Outcome, list[PendingCall]]:
     """Replay `flow`, recording each result for the call it suspends on."""
     run = Run(uuid4(), WORK)
-    journal: list[JournalRow] = []
+    journal: list[CallRow] = []
     calls: list[PendingCall] = []
     for result in results:
         outcome = engine.replay(flow, run, START, journal)
@@ -127,11 +147,22 @@ def test_prompt_runs_a_turn_step_and_returns_the_final_message() -> None:
         sandbox,
     )
     assert call.args == {
-        "agent": "implementer",
+        "agent": agent_json("implementer"),
         "prompt": "do it",
         "repo": REPO_JSON,
-        "returns": None,
+        "schema": None,
     }
+
+
+def test_an_agent_refuses_a_harness_a_step_container_could_not_rebuild() -> None:
+    class Opaque:
+        def run_turn(self, turn: Turn, on_event: Callable[[str], None]) -> TurnResult:
+            raise NotImplementedError
+
+    with pytest.raises(TypeError, match="module level"):
+        Agent("local", local_harness())
+    with pytest.raises(TypeError, match="dataclass or Pydantic model"):
+        Agent("opaque", Opaque())
 
 
 def test_prompt_with_feedback_renders_it() -> None:
@@ -163,7 +194,7 @@ def test_prompt_with_returns_gives_back_a_validated_value() -> None:
 
     assert outcome == Succeeded()
     assert decisions[-1] == Decision(docs_only=True, reason="README only")
-    assert call.args["returns"] == "test_agents:Decision"
+    assert call.args["schema"] == TypeAdapter(Decision).json_schema()
 
 
 def test_prompt_with_returns_fails_the_run_on_a_value_of_the_wrong_shape() -> None:
@@ -203,7 +234,7 @@ def test_approves_maps_comments_to_feedback_and_approval_to_passed() -> None:
         Feedback([FeedbackItem("reviewer", "rename"), FeedbackItem("reviewer", "test")])
     ]
     assert [c.name for c in calls] == ["reviewer", "implementer", "reviewer"]
-    assert calls[0].args["returns"] == "fledge.agents:Review"
+    assert calls[0].args["schema"] == TypeAdapter(Review).json_schema()
     assert calls[0].args["prompt"] == "review it"
     assert calls[0].sandbox == Sandbox()
 
@@ -211,7 +242,6 @@ def test_approves_maps_comments_to_feedback_and_approval_to_passed() -> None:
 @dataclass
 class FakeContext:
     workspace: Path
-    agents: dict[str, Agent]
     pending_guidance: list[list[str]] = field(default_factory=list)
     work: WorkItem = WORK
     run_id: UUID = field(default_factory=uuid4)
@@ -227,15 +257,15 @@ class FakeContext:
     def claim_guidance(self) -> list[str]:
         return self.pending_guidance.pop(0) if self.pending_guidance else []
 
-    def harness(self, agent: str) -> Harness:
-        return self.agents[agent].harness
-
 
 def turn_args(
-    workspace: Path, prompt: str, returns: str | None = None
+    workspace: Path,
+    prompt: str,
+    schema: JsonValue = None,
+    structured: JsonValue = None,
 ) -> dict[str, JsonValue]:
     return {
-        "agent": "dev",
+        "agent": agent_json("dev", structured),
         "prompt": prompt,
         "repo": {
             "url": "https://github.com/acme/api",
@@ -243,81 +273,63 @@ def turn_args(
             "branch": "fledge/abc",
             "base": "main",
         },
-        "returns": returns,
+        "schema": schema,
     }
 
 
 @pytest.fixture
-def harness() -> FakeHarness:
-    return FakeHarness()
+def ctx(tmp_path: Path) -> FakeContext:
+    TURNS.clear()
+    return FakeContext(tmp_path)
 
 
-@pytest.fixture
-def ctx(tmp_path: Path, harness: FakeHarness) -> FakeContext:
-    return FakeContext(tmp_path, {"dev": Agent("dev", harness)})
-
-
-def test_run_turn_starts_a_session_and_resumes_it_next_time(
-    ctx: FakeContext, harness: FakeHarness
-) -> None:
+def test_run_turn_starts_a_session_and_resumes_it_next_time(ctx: FakeContext) -> None:
     first = run_turn.execute(ctx, turn_args(ctx.workspace, "start"))
     second = run_turn.execute(ctx, turn_args(ctx.workspace, "continue"))
 
     home = ctx.workspace / "agents" / "dev"
     assert first == turn_output("done 1")
     assert second == turn_output("done 2")
-    assert [(t.prompt, t.session_id) for t in harness.turns] == [
+    assert [(t.prompt, t.session_id) for t in TURNS] == [
         ("start", None),
         ("continue", "session-1"),
     ]
     assert (home / "session").read_text() == "session-2"
-    assert all(t.state_dir == home / "state" for t in harness.turns)
+    assert all(t.state_dir == home / "state" for t in TURNS)
     assert (home / "state").is_dir()
-    assert all(t.workdir == ctx.workspace / "repos" / "api" for t in harness.turns)
-    assert all(t.output_schema is None for t in harness.turns)
+    assert all(t.workdir == ctx.workspace / "repos" / "api" for t in TURNS)
+    assert all(t.output_schema is None for t in TURNS)
     assert ctx.agent_events == ["turn 1", "turn 2"]
 
 
 def test_run_turn_delivers_guidance_as_more_turns_in_the_session(
-    ctx: FakeContext, harness: FakeHarness
+    ctx: FakeContext,
 ) -> None:
     ctx.pending_guidance = [["use tabs", "add a test"], ["and docs"], [], ["later"]]
 
     result = run_turn.execute(ctx, turn_args(ctx.workspace, "start"))
 
     assert result == turn_output("done 3")
-    assert [t.session_id for t in harness.turns] == [None, "session-1", "session-2"]
-    assert "Message 1:\nuse tabs\n\nMessage 2:\nadd a test" in harness.turns[1].prompt
-    assert "Message 1:\nand docs" in harness.turns[2].prompt
+    assert [t.session_id for t in TURNS] == [None, "session-1", "session-2"]
+    assert "Message 1:\nuse tabs\n\nMessage 2:\nadd a test" in TURNS[1].prompt
+    assert "Message 1:\nand docs" in TURNS[2].prompt
     assert ctx.pending_guidance == [["later"]]
 
 
-def test_run_turn_asks_for_the_schema_of_the_returns_type(
-    ctx: FakeContext, harness: FakeHarness
+def test_run_turn_gives_the_harness_the_schema_and_returns_its_answer(
+    ctx: FakeContext,
 ) -> None:
-    harness.structured = {"docs_only": False, "reason": "code"}
+    schema = TypeAdapter(Decision).json_schema()
+    answer: JsonValue = {"docs_only": False, "reason": "code"}
 
-    result = run_turn.execute(
-        ctx, turn_args(ctx.workspace, "decide", "test_agents:Decision")
-    )
+    result = run_turn.execute(ctx, turn_args(ctx.workspace, "decide", schema, answer))
 
-    assert result == turn_output("done 1", {"docs_only": False, "reason": "code"})
-    [turn] = harness.turns
-    assert turn.output_schema == TypeAdapter(Decision).json_schema()
+    assert result == turn_output("done 1", answer)
+    [turn] = TURNS
+    assert turn.output_schema == schema
 
 
 def test_run_turn_fails_without_a_structured_result(ctx: FakeContext) -> None:
+    schema = TypeAdapter(Review).json_schema()
     with pytest.raises(RuntimeError, match="without a structured result"):
-        run_turn.execute(
-            ctx, turn_args(ctx.workspace, "review", "fledge.agents:Review")
-        )
-
-
-def test_review_schema_is_what_approves_asks_for(
-    ctx: FakeContext, harness: FakeHarness
-) -> None:
-    harness.structured = {"approved": True, "comments": []}
-
-    run_turn.execute(ctx, turn_args(ctx.workspace, "review", "fledge.agents:Review"))
-
-    assert harness.turns[0].output_schema == TypeAdapter(Review).json_schema()
+        run_turn.execute(ctx, turn_args(ctx.workspace, "review", schema))

@@ -88,7 +88,7 @@ You need:
    will be asked to. End with a short summary of what you changed and why.
    """
 
-   implementer = Agent("tickets_implementer", ClaudeCode())
+   implementer = Agent("implementer", ClaudeCode())
 
 
    @workflow(trigger=GitHubIssues(repo="owner/name", label="fledge"))
@@ -288,9 +288,11 @@ made. That gives the rules for workflow code:
 - **Do not catch `BaseException` or use a bare `except:`.** That would
   swallow the suspension Fledge raises through the function. `except
   Exception` is fine, for example around a step call to handle `StepFailed`.
-- **Agents, steps, checks and `returns=` types are defined at module level**,
-  because a step container imports them from the run's snapshot of the
-  workflows directory. Agent names are unique across the directory.
+- **Steps, checks and harness classes are defined at module level**, because
+  a step container imports them from the run's snapshot of the workflows
+  directory. A harness is a dataclass or Pydantic model, so the container can
+  rebuild it from its fields. Agents that one run prompts have different
+  names: the name keys the agent's session.
 - **Step arguments and results are JSON-serialisable and annotated**:
   built-in types, dataclasses and Pydantic models.
 

@@ -5,10 +5,8 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from fledge.agents import Agent
 from fledge.core import WorkItem
 from fledge.git import GitError, clone_repo
-from fledge.harnesses.base import Harness
 
 GITHUB_CREDENTIAL = "ghp_test_credential"
 
@@ -71,7 +69,6 @@ class FakeContext:
         )
     )
     run_id: UUID = field(default_factory=uuid4)
-    agents: dict[str, Agent] = field(default_factory=dict)
     pending_guidance: list[list[str]] = field(default_factory=list)
     logs: list[str] = field(default_factory=list)
     agent_events: list[str] = field(default_factory=list)
@@ -84,9 +81,6 @@ class FakeContext:
 
     def claim_guidance(self) -> list[str]:
         return self.pending_guidance.pop(0) if self.pending_guidance else []
-
-    def harness(self, agent: str) -> Harness:
-        return self.agents[agent].harness
 
 
 @pytest.mark.parametrize("with_token", [True, False])

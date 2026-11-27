@@ -8,16 +8,16 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel, ConfigDict, JsonValue, StringConstraints
 
 from fledge.control.store import (
-    CallKind,
+    CallStatus,
     EventKind,
     Guidance,
     GuidanceSource,
     RunOrigin,
     RunRow,
     RunStatus,
-    StepStatus,
     Store,
 )
+from fledge.engine import CallKind
 
 
 class RunOut(BaseModel):
@@ -39,14 +39,14 @@ class RunOut(BaseModel):
     finished_at: datetime | None
 
 
-class StepRunOut(BaseModel):
+class CallOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    step_index: int
+    position: int
     kind: CallKind
     name: str
-    status: StepStatus
+    status: CallStatus
     result: JsonValue
     error: str | None
     started_at: datetime
@@ -65,7 +65,7 @@ class GuidanceOut(BaseModel):
 
 class RunDetail(BaseModel):
     run: RunOut
-    steps: list[StepRunOut]
+    calls: list[CallOut]
     guidance: list[GuidanceOut]
 
 
@@ -73,7 +73,7 @@ class EventOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    step_run_id: UUID | None
+    call_id: UUID | None
     at: datetime
     kind: EventKind
     message: str
@@ -106,7 +106,7 @@ async def run_detail(store: Store, run_id: UUID) -> RunDetail:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "run not found")
     return RunDetail(
         run=RunOut.model_validate(run),
-        steps=[StepRunOut.model_validate(s) for s in await store.list_journal(run_id)],
+        calls=[CallOut.model_validate(c) for c in await store.list_journal(run_id)],
         guidance=[guidance_out(g) for g in await store.list_guidance(run_id)],
     )
 

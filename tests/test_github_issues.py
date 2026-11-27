@@ -58,8 +58,7 @@ def test_missing_token_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         GitHubIssuesTrigger(repo="acme/widgets", label="fledge")
 
 
-@pytest.mark.anyio
-async def test_poll_filters_by_label_excludes_prs_and_follows_pages() -> None:
+def test_poll_filters_by_label_excludes_prs_and_follows_pages() -> None:
     requests: list[httpx.Request] = []
     next_url = "https://api.github.com/repositories/1/issues?page=2"
 
@@ -73,7 +72,7 @@ async def test_poll_filters_by_label_excludes_prs_and_follows_pages() -> None:
             headers={"Link": f'<{next_url}>; rel="next"'},
         )
 
-    items = await make_trigger(handler).poll()
+    items = make_trigger(handler).poll()
 
     assert items == [
         WorkItem(
@@ -99,39 +98,35 @@ async def test_poll_filters_by_label_excludes_prs_and_follows_pages() -> None:
     assert str(requests[1].url) == next_url
 
 
-@pytest.mark.anyio
-async def test_fetch_returns_issue() -> None:
+def test_fetch_returns_issue() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/repos/acme/widgets/issues/7"
         return httpx.Response(200, json=issue(7))
 
-    item = await make_trigger(handler).fetch("7")
+    item = make_trigger(handler).fetch("7")
 
     assert item.external_id == "7"
     assert item.url == "https://github.com/acme/widgets/issues/7"
 
 
-@pytest.mark.anyio
-async def test_fetch_rejects_pull_request() -> None:
+def test_fetch_rejects_pull_request() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=issue(7, pr=True))
 
     with pytest.raises(ValueError, match="pull request"):
-        await make_trigger(handler).fetch("7")
+        make_trigger(handler).fetch("7")
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize("ref", ["abc", "#7", "-1", ""])
-async def test_fetch_rejects_non_number_without_request(ref: str) -> None:
+def test_fetch_rejects_non_number_without_request(ref: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("no request expected")
 
     with pytest.raises(ValueError, match="issue number"):
-        await make_trigger(handler).fetch(ref)
+        make_trigger(handler).fetch(ref)
 
 
-@pytest.mark.anyio
-async def test_poll_guidance_filters_by_creation_time_and_bots() -> None:
+def test_poll_guidance_filters_by_creation_time_and_bots() -> None:
     since = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     seen: list[httpx.Request] = []
 
@@ -146,20 +141,19 @@ async def test_poll_guidance_filters_by_creation_time_and_bots() -> None:
             ],
         )
 
-    comments = await make_trigger(handler).poll_guidance("5", since)
+    comments = make_trigger(handler).poll_guidance("5", since)
 
     assert comments == [Comment(external_id="2", author="alice", body="comment 2")]
     assert seen[0].url.path == "/repos/acme/widgets/issues/5/comments"
     assert seen[0].url.params["since"] == "2026-01-01T12:00:00+00:00"
 
 
-@pytest.mark.anyio
-async def test_http_error_propagates() -> None:
+def test_http_error_propagates() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(502, json={"message": "bad gateway"})
 
     with pytest.raises(httpx.HTTPStatusError):
-        await make_trigger(handler).poll()
+        make_trigger(handler).poll()
 
 
 def access(repo: int = 200, issues: int = 200, push: int = 200) -> Handler:
@@ -178,12 +172,10 @@ def access(repo: int = 200, issues: int = 200, push: int = 200) -> Handler:
     return handler
 
 
-@pytest.mark.anyio
-async def test_check_passes_when_the_token_can_read_and_push() -> None:
-    await make_trigger(access()).check()
+def test_check_passes_when_the_token_can_read_and_push() -> None:
+    make_trigger(access()).check()
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("handler", "message"),
     [
@@ -193,12 +185,11 @@ async def test_check_passes_when_the_token_can_read_and_push() -> None:
         (access(push=403), "cannot push to acme/widgets"),
     ],
 )
-async def test_check_names_the_missing_access(handler: Handler, message: str) -> None:
+def test_check_names_the_missing_access(handler: Handler, message: str) -> None:
     with pytest.raises(TriggerCheckError, match=message):
-        await make_trigger(handler).check()
+        make_trigger(handler).check()
 
 
-@pytest.mark.anyio
-async def test_check_lets_other_github_errors_through() -> None:
+def test_check_lets_other_github_errors_through() -> None:
     with pytest.raises(httpx.HTTPStatusError):
-        await make_trigger(access(repo=500)).check()
+        make_trigger(access(repo=500)).check()

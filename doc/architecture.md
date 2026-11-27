@@ -134,7 +134,7 @@ flowchart TB
    the runner to create the run's workspace.
 3. **Replay.** Every tick (two seconds), for each running run, the
    orchestrator loads the workflow from the run's snapshot and calls the
-   function with the run's journal: its `step_runs` rows in call order. Each
+   function with the run's journal: its `calls` rows in call order. Each
    step or wait the function calls is matched to the journal by position. A
    call with a recorded result returns it; a failed step raises `StepFailed`
    in the workflow. The first call without a result suspends the function by
@@ -143,7 +143,7 @@ flowchart TB
    than return the wrong result.
 4. **Step.** If the run is suspended on a step and fewer than
    `FLEDGE_MAX_CONCURRENT_STEPS` step containers are running across all runs,
-   the orchestrator inserts a `step_runs` row with the call's position,
+   the orchestrator inserts a `calls` row with the call's position,
    function and arguments and a fresh token, and asks the runner to start a
    container with the sandbox's services next to it. The container gets the
    configured secrets, the sandbox's environment, three settings (API URL,
@@ -162,7 +162,7 @@ flowchart TB
    container exits without a result, or exceeds `FLEDGE_STEP_TIMEOUT_MINUTES`,
    the step is marked failed and the call raises `StepFailed` in the workflow.
 7. **Wait.** If the run is suspended on a wait, the orchestrator inserts a
-   `step_runs` row for it (no container) and, every
+   `calls` row for it (no container, no token) and, every
    `FLEDGE_POLL_INTERVAL_SECONDS`, calls the wait function in the control
    plane. Pending keeps the run suspended; any other verdict is recorded as
    the call's result and the next replay carries on from it.
@@ -193,10 +193,12 @@ workflow has passed), so it is the same on every replay.
 
 `agent.prompt(prompt, repo)` is a call of the built-in step
 `fledge.agents:run_turn`, shown under the agent's name and run with the
-agent's sandbox. Its arguments are the agent's name, the prompt, the
-repository and, with `returns=`, a reference to the result type. In the
-container the step looks the agent up by name in the run's snapshot, so a
-harness is never serialised.
+agent's sandbox. Its arguments are the agent (its name, the harness class as
+`module:qualname` and the harness's fields as JSON), the prompt, the
+repository and, with `returns=`, the JSON Schema of the result type. In the
+container the step rebuilds the harness from those, so a harness is a
+module-level dataclass or Pydantic model. `Agent(...)` raises when it is
+constructed with one that is not.
 
 Each agent has a directory in the workspace, `agents/<name>/`, outside every
 repository. It holds the harness's state directory (`CLAUDE_CONFIG_DIR` for
@@ -210,7 +212,8 @@ set, runs `gh auth setup-git`, so the agent can fetch, push and use `gh` with
 the token. The credential helper is in the container's own git config, so
 the token is never written to the workspace.
 
-With `returns=`, the step derives a JSON Schema from the type and the harness
+With `returns=`, the workflow derives a JSON Schema from the type, validates
+the answer against the type when the call returns, and the harness
 asks the CLI for an answer matching it (`--json-schema` for Claude Code,
 `--output-schema` for Codex). The step fails if the turn ends without one.
 `Agent.approves` uses this with the `Review` type and maps `approved` to
@@ -311,8 +314,8 @@ Six tables. Ids are `uuid`, times are `timestamptz`.
 | Table | Columns that matter |
 | --- | --- |
 | `runs` | `id`, `external_id`, `origin` (`poll` or `manual`), `workflow`, `snapshot_hash`, `title`, `body`, `url`, `repo_url`, `status` (`pending`, `running`, `succeeded`, `failed`, `cancelled`), `cancel_requested`, `error`, `created_at`, `started_at`, `finished_at` |
-| `step_runs` | The journal, one row per call: `id`, `run_id`, `step_index` (the call's position), `kind` (`step` or `wait`), `name`, `function` (`module:qualname`), `args` (`jsonb`), `status` (`running`, `succeeded`, `failed`, `cancelled`), `result` (`jsonb`), `error`, `token_hash`, `started_at`, `finished_at`; unique on (`run_id`, `step_index`) |
-| `events` | `id` (`bigint` identity), `run_id`, `step_run_id`, `at`, `kind` (`log`, `agent`, `state`), `message` |
+| `calls` | The journal, one row per call: `id`, `run_id`, `position`, `kind` (`step` or `wait`), `name`, `function` (`module:qualname`), `args` (`jsonb`), `status` (`running`, `succeeded`, `failed`, `cancelled`), `result` (`jsonb`), `error`, `token_hash` (steps only), `started_at`, `finished_at`; unique on (`run_id`, `position`). A step run, as the internal API and the runner call it, is a call of kind `step` and shares its id. |
+| `events` | `id` (`bigint` identity), `run_id`, `call_id`, `at`, `kind` (`log`, `agent`, `state`), `message` |
 | `guidance` | `id`, `run_id`, `source` (`web` or `trigger`), `external_id`, `author`, `body`, `created_at`, `delivered_at`; unique on (`run_id`, `external_id`) |
 | `workflow_snapshots` | `hash`, `files` (`jsonb`, source text by relative path), `created_at` |
 | `schema_migrations` | `version`, `applied_at` |
@@ -349,7 +352,8 @@ token. The models are in `fledge.wire`:
 
 The web view is two server-rendered pages: a run list with the launch box, and a
 run page listing each call with its kind, status, result and error, the event
-log, a cancel button and the guidance box. A few lines of script poll the API.
+log, a cancel button and the guidance box. While a run is active, htmx polls
+`GET /runs/{id}/live` and swaps in the parts that change and any new events.
 No frontend build.
 
 ## 3. Extension point interfaces
@@ -358,8 +362,8 @@ Workflows are Python files in the directory named by `FLEDGE_WORKFLOWS_DIR`
 (default `workflows`). At startup the control plane reads every file in it
 (skipping dotfiles and `__pycache__`) into a snapshot, stores the snapshot under
 its hash, imports the snapshot as a package, and collects every module-level
-workflow and agent. Startup fails if the directory is missing or has no Python
-files, if no workflow is found, if two workflows or two agents share a name,
+workflow. Startup fails if the directory is missing or has no Python
+files, if no workflow is found, if two workflows share a name,
 if a module fails to import, or if a trigger's `check()` fails. Modules in the
 directory import each other with relative imports, so custom steps, checks,
 harnesses and triggers can live next to the workflows that use them.
@@ -370,12 +374,13 @@ worth revisiting with a trust model for them, since their code would run in
 the control plane.
 
 There is no registry. A step container finds a step by its `module:qualname`
-in the run's snapshot, and an agent by its name, so steps, checks, agents and
-`returns=` types must be defined at module level.
+in the run's snapshot, and a harness class the same way, so steps, checks and
+harness classes must be defined at module level.
 
 ### Trigger
 
-Runs in the control plane, so its methods are async.
+Runs in the control plane, which calls its methods off its event loop: they
+are plain functions and may block on I/O, like steps and waits.
 
 ```python
 @dataclass(frozen=True)
@@ -395,16 +400,16 @@ class Comment:
 
 
 class Trigger(Protocol):
-    async def check(self) -> None:
+    def check(self) -> None:
         """Raise TriggerCheckError if the trigger or its workflow cannot work."""
 
-    async def poll(self) -> list[WorkItem]:
+    def poll(self) -> list[WorkItem]:
         """Work that currently qualifies. Returning an item again is harmless."""
 
-    async def fetch(self, ref: str) -> WorkItem:
+    def fetch(self, ref: str) -> WorkItem:
         """One specific item, for a manual launch."""
 
-    async def poll_guidance(
+    def poll_guidance(
         self, item_external_id: str, since: datetime
     ) -> list[Comment]:
         """Human comments on the item made after `since`."""
@@ -497,7 +502,6 @@ class StepContext(Protocol):
     def log(self, message: str) -> None: ...
     def agent_event(self, message: str) -> None: ...
     def claim_guidance(self) -> list[str]: ...
-    def harness(self, agent: str) -> Harness: ...
 ```
 
 A workflow calls `changed_files(repo)`, without the context. Every parameter
@@ -573,7 +577,10 @@ class Harness(Protocol):
 ```
 
 A harness is a value with options, `ClaudeCode(model=...)`, given to an
-`Agent`. `on_event` receives human-readable progress lines, which become
+`Agent`: a module-level dataclass or Pydantic model, because the step
+container rebuilds it from its fields. `run_cli` in `fledge.harnesses.base`
+runs a CLI with the prompt on stdin and hands back its output line by line,
+for harnesses that wrap one. `on_event` receives human-readable progress lines, which become
 `agent` events in the web view. Environment variables come from the
 container.
 

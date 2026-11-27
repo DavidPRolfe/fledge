@@ -13,12 +13,13 @@ from pydantic import JsonValue
 from fledge import engine
 from fledge.agents import Agent
 from fledge.checks import Feedback, FeedbackItem, Passed, Pending, Stopped, until
-from fledge.control.store import JournalRow
+from fledge.control.store import CallRow
 from fledge.core import Repo, Run, WorkItem
 from fledge.engine import PendingCall, workflow
 from fledge.github import (
     GitHubIssues,
     PullRequest,
+    api,
     checks_green,
     mark_ready,
     merged,
@@ -216,7 +217,7 @@ def user(login: str, kind: str = "User") -> Json:
 
 
 def issue_comment(login: str, body: str, at: str, kind: str = "User") -> Json:
-    return {"user": user(login, kind), "body": body, "created_at": at}
+    return {"id": 1, "user": user(login, kind), "body": body, "created_at": at}
 
 
 def review(login: str, state: str, body: str, at: str | None) -> Json:
@@ -391,7 +392,7 @@ def use_fake_github(monkeypatch: pytest.MonkeyPatch, github: FakeGitHub) -> list
         tokens.append(token)
         return github.client()
 
-    monkeypatch.setattr(pulls, "github_client", client)
+    monkeypatch.setattr(api, "client", client)
     return tokens
 
 
@@ -810,6 +811,7 @@ def test_merged_asks_for_comments_since_the_loop_last_had_feedback(repo: Repo) -
     assert all(r.url.params["since"] == SINCE.isoformat() for r in comment_requests)
 
 
+@dataclass(frozen=True)
 class UnusedHarness:
     """Replay never runs a turn: the journal has the results."""
 
@@ -827,12 +829,12 @@ WORK = WorkItem(
 )
 
 
-def entry(run: Run, call: PendingCall, result: JsonValue) -> JournalRow:
+def entry(run: Run, call: PendingCall, result: JsonValue) -> CallRow:
     at = SINCE + timedelta(minutes=call.position)
-    return JournalRow(
+    return CallRow(
         id=uuid4(),
         run_id=run.id,
-        step_index=call.position,
+        position=call.position,
         kind=call.kind,
         name=call.name,
         function=call.function,
@@ -866,7 +868,7 @@ def test_open_pull_request_and_push_prompt_the_agent_then_verify(
         {"message": "Pushed.", "structured": None},
         None,
     ]
-    journal: list[JournalRow] = []
+    journal: list[CallRow] = []
     calls: list[PendingCall] = []
     for result in results:
         outcome = engine.replay(publish, run, SINCE, journal)

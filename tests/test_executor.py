@@ -24,11 +24,9 @@ WORKSPACE = Path("/workspace-under-test")
 STEPS_SOURCE = """\
 from dataclasses import dataclass
 
-from fledge import Agent, Repo, Run, StepContext, step, workflow
+from fledge import Repo, Run, StepContext, step, workflow
 
-from .shared import FakeHarness, NoTrigger
-
-helper = Agent("helper", FakeHarness())
+from .shared import NoTrigger
 
 
 @dataclass(frozen=True)
@@ -62,11 +60,6 @@ def explode(ctx: StepContext) -> None:
     raise ValueError("nothing works")
 
 
-@step
-def harness_of(ctx: StepContext, agent: str) -> str:
-    return type(ctx.harness(agent)).__name__
-
-
 @workflow(trigger=NoTrigger())
 def tickets(run: Run) -> None:
     explode()
@@ -75,11 +68,6 @@ SHARED_SOURCE = """\
 class NoTrigger:
     def start(self):
         raise AssertionError("step containers never start triggers")
-
-
-class FakeHarness:
-    def run_turn(self, turn, on_event):
-        raise AssertionError("not prompted in these tests")
 """
 REPO: dict[str, JsonValue] = {
     "url": "https://example.com/repo",
@@ -202,13 +190,9 @@ def test_success_reports_the_typed_result_and_sends_token_on_every_call() -> Non
     ("step_context", "error"),
     [
         (context("explode", {}), "ValueError: nothing works"),
-        (
-            context("harness_of", {"agent": "nobody"}),
-            "LookupError: the run's workflow code defines no agent 'nobody'",
-        ),
         (context("tickets", {}), "TypeError: "),
     ],
-    ids=["step-raises", "unknown-agent", "not-a-step"],
+    ids=["step-raises", "not-a-step"],
 )
 def test_failures_are_reported_as_failed(
     step_context: dict[str, object], error: str
@@ -221,15 +205,6 @@ def test_failures_are_reported_as_failed(
     assert result["status"] == "failed"
     assert result["result"] is None
     assert str(result["error"]).startswith(error)
-
-
-def test_a_step_finds_the_runs_agents_by_name() -> None:
-    fake = FakeControlPlane(context=context("harness_of", {"agent": "helper"}))
-
-    assert run_executor(fake) == 0
-
-    [result] = fake.bodies("/result")
-    assert result["result"] == "FakeHarness"
 
 
 @pytest.fixture

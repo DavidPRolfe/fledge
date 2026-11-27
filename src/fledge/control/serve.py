@@ -21,16 +21,16 @@ logger = logging.getLogger(__name__)
 
 async def _serve(config: Settings, database_url: str, host: str, port: int) -> None:
     snapshot = read_snapshot(config.workflows_dir)
-    loaded = load_workflows(snapshot.files)
-    bindings = start_triggers(snapshot.hash, loaded.workflows)
+    workflows = load_workflows(snapshot.files)
+    bindings = start_triggers(snapshot.hash, workflows)
     for name, binding in bindings.items():
         try:
-            await binding.trigger.check()
+            await asyncio.to_thread(binding.trigger.check)
         except TriggerCheckError as err:
             raise SystemExit(f"workflow {name!r}: {err}") from err
     logger.info(
         "loaded workflows %s from %s (snapshot %s)",
-        ", ".join(sorted(loaded.workflows)),
+        ", ".join(sorted(workflows)),
         config.workflows_dir,
         snapshot.hash[:12],
     )

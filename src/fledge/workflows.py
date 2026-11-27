@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from importlib.machinery import ModuleSpec
 from pathlib import Path
 
-from fledge.agents import Agent
 from fledge.engine import Workflow
 
 
@@ -24,12 +23,6 @@ class Snapshot:
     hash: str
     files: Mapping[str, str]
     """Source text by path relative to the workflows directory."""
-
-
-@dataclass(frozen=True)
-class Loaded:
-    workflows: Mapping[str, Workflow]
-    agents: Mapping[str, Agent]
 
 
 def snapshot_hash(files: Mapping[str, str]) -> str:
@@ -54,11 +47,11 @@ def read_snapshot(directory: Path) -> Snapshot:
 
 # Importing a snapshot twice would create a second copy of every class and
 # function in it, so each snapshot is imported once per process.
-_loaded: dict[str, Loaded] = {}
+_loaded: dict[str, Mapping[str, Workflow]] = {}
 
 
-def load_workflows(files: Mapping[str, str]) -> Loaded:
-    """Import the snapshot's top-level modules and collect their workflows and agents."""
+def load_workflows(files: Mapping[str, str]) -> Mapping[str, Workflow]:
+    """Import the snapshot's top-level modules and collect their workflows by name."""
     digest = snapshot_hash(files)
     cached = _loaded.get(digest)
     if cached is not None:
@@ -79,26 +72,19 @@ def load_workflows(files: Mapping[str, str]) -> Loaded:
     spec.submodule_search_locations = [str(directory)]
     sys.modules[package] = importlib.util.module_from_spec(spec)
     workflows: dict[str, Workflow] = {}
-    agents: dict[str, Agent] = {}
     for path in sorted(directory.glob("*.py")):
         if path.name == "__init__.py":
             continue
         module = importlib.import_module(f"{package}.{path.stem}")
         for value in vars(module).values():
-            if isinstance(value, Workflow):
-                _add(workflows, value.name, value, "workflows")
-            elif isinstance(value, Agent):
-                _add(agents, value.name, value, "agents")
+            # Identity, not equality: the same workflow imported into a second
+            # module counts once, but two separately defined ones clash.
+            if (
+                isinstance(value, Workflow)
+                and workflows.setdefault(value.name, value) is not value
+            ):
+                raise ValueError(f"two workflows are named {value.name!r}")
     if not workflows:
         raise ValueError("the workflow files define no module-level Workflow")
-    loaded = Loaded(workflows=workflows, agents=agents)
-    _loaded[digest] = loaded
-    return loaded
-
-
-def _add[T](found: dict[str, T], name: str, value: T, kind: str) -> None:
-    # Identity, not equality: the same object imported into a second module
-    # counts once, but two separately defined ones clash even if equal.
-    existing = found.setdefault(name, value)
-    if existing is not value:
-        raise ValueError(f"two {kind} are named {name!r}")
+    _loaded[digest] = workflows
+    return workflows

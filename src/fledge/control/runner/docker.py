@@ -118,6 +118,9 @@ class DockerRunner:
             network=step_network,
             labels=dict(labels),
             detach=True,
+            # As for the step container: without an init process, an image
+            # whose command ignores SIGTERM takes the whole kill timeout to stop.
+            init=True,
         )
         container.reload()
         address: str = container.attrs["NetworkSettings"]["Networks"][step_network][

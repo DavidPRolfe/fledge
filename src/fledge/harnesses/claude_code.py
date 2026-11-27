@@ -1,16 +1,13 @@
 """Harness for the Claude Code CLI in headless stream-json mode."""
 
 import json
-import os
-import subprocess
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, JsonValue
 
-from fledge.harnesses.base import Turn, TurnResult
+from fledge.harnesses.base import Turn, TurnResult, run_cli
 
 _SUMMARY_KEYS = ("command", "file_path", "pattern", "url", "description")
 
@@ -134,38 +131,15 @@ class ClaudeCode:
             argv += ["--json-schema", json.dumps(turn.output_schema)]
         if turn.session_id is not None:
             argv += ["--resume", turn.session_id]
+        result: _ResultEvent | None = None
+
+        def on_line(line: str) -> None:
+            nonlocal result
+            result = _handle_line(line, on_event) or result
+
         # Claude Code keeps its sessions under the config dir, so pointing it
         # at state_dir lets a turn in a later container resume them.
-        env = {**os.environ, "CLAUDE_CONFIG_DIR": str(turn.state_dir)}
-
-        result: _ResultEvent | None = None
-        # The prompt goes in on stdin so one starting with "-" cannot be read
-        # as an option. stderr goes to a file so a chatty stderr cannot fill
-        # its pipe and stall the process while we block on stdout.
-        with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as stderr:
-            stdin.write(turn.prompt.encode())
-            stdin.seek(0)
-            with subprocess.Popen(  # noqa: S603 -- fixed argv without a shell; the step container is the sandbox
-                argv,
-                cwd=turn.workdir,
-                env=env,
-                stdin=stdin,
-                stdout=subprocess.PIPE,
-                stderr=stderr,
-                text=True,
-            ) as proc:
-                # Leaving the Popen block waits for the process, so a failure
-                # while reading must kill it first or that wait could hang.
-                try:
-                    assert proc.stdout is not None  # noqa: S101 -- guaranteed by stdout=PIPE; narrows the type
-                    for line in proc.stdout:
-                        if line.strip():
-                            result = _handle_line(line, on_event) or result
-                except BaseException:
-                    proc.kill()
-                    raise
-            returncode = proc.returncode
-            stderr.seek(0)
-            stderr_text = stderr.read().decode(errors="replace").strip()
-
+        returncode, stderr_text = run_cli(
+            argv, turn, {"CLAUDE_CONFIG_DIR": str(turn.state_dir)}, on_line
+        )
         return _turn_result(turn, result, returncode, stderr_text)

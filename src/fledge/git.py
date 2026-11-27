@@ -11,6 +11,13 @@ from fledge.engine import step
 
 GITHUB_TOKEN_ENV = "GITHUB_TOKEN"  # noqa: S105 - name of an env var, not a secret
 
+_COMMIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "fledge",
+    "GIT_AUTHOR_EMAIL": "fledge@users.noreply.github.com",
+    "GIT_COMMITTER_NAME": "fledge",
+    "GIT_COMMITTER_EMAIL": "fledge@users.noreply.github.com",
+}
+
 
 class GitError(RuntimeError):
     pass
@@ -49,6 +56,21 @@ def git(workspace: Path, *args: str, token: str | None = None) -> str:
             f"{result.stderr.strip()}"
         )
     return result.stdout.strip()
+
+
+def prepare_agent_git() -> None:
+    """Let an agent in this container commit, and push with the configured token.
+
+    The credential helper goes in the container's own git config, so the token
+    is never written to the workspace.
+    """
+    for name, value in _COMMIT_IDENTITY.items():
+        os.environ.setdefault(name, value)
+    if os.environ.get(GITHUB_TOKEN_ENV):
+        subprocess.run(
+            ["gh", "auth", "setup-git"],  # noqa: S607 - gh is resolved from PATH in the step image
+            check=True,
+        )
 
 
 def _repository_name(url: str) -> str:

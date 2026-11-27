@@ -30,24 +30,22 @@ class FakeTrigger:
     comments: dict[str, list[Comment]] = field(default_factory=dict)
     guidance_calls: list[tuple[str, datetime]] = field(default_factory=list)
 
-    async def check(self) -> None:
+    def check(self) -> None:
         pass
 
-    async def poll(self) -> list[WorkItem]:
+    def poll(self) -> list[WorkItem]:
         return self.items
 
-    async def fetch(self, ref: str) -> WorkItem:
+    def fetch(self, ref: str) -> WorkItem:
         return work_item(ref)
 
-    async def poll_guidance(
-        self, item_external_id: str, since: datetime
-    ) -> list[Comment]:
+    def poll_guidance(self, item_external_id: str, since: datetime) -> list[Comment]:
         self.guidance_calls.append((item_external_id, since))
         return self.comments.get(item_external_id, [])
 
 
 class BrokenTrigger(FakeTrigger):
-    async def poll(self) -> list[WorkItem]:
+    def poll(self) -> list[WorkItem]:
         raise ConnectionError("ticket system is down")
 
 

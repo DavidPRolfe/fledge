@@ -20,24 +20,24 @@ class TriggerCheckError(RuntimeError):
 
 @runtime_checkable
 class Trigger(Protocol):
-    async def check(self) -> None:
+    """Its methods may block on I/O: the control plane calls them off its event loop."""
+
+    def check(self) -> None:
         """Raise TriggerCheckError if the trigger or its workflow cannot work.
 
         Called once at startup, before any polling.
         """
         ...
 
-    async def poll(self) -> list[WorkItem]:
+    def poll(self) -> list[WorkItem]:
         """Work that currently qualifies. Returning an item again is harmless."""
         ...
 
-    async def fetch(self, ref: str) -> WorkItem:
+    def fetch(self, ref: str) -> WorkItem:
         """One specific item, for a manual launch."""
         ...
 
-    async def poll_guidance(
-        self, item_external_id: str, since: datetime
-    ) -> list[Comment]:
+    def poll_guidance(self, item_external_id: str, since: datetime) -> list[Comment]:
         """Human comments on the item made after `since`."""
         ...
 

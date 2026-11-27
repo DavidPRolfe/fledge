@@ -20,7 +20,7 @@ from fledge import checks, core, engine
 from fledge.control.runner.base import ContainerState, Runner, StepSpec
 from fledge.control.settings import Settings
 from fledge.control.store import (
-    JournalRow,
+    CallRow,
     RunRow,
     Store,
     TerminalRunStatus,
@@ -108,10 +108,10 @@ class Orchestrator:
         await self._continue(run, journal, latest)
 
     async def _continue(
-        self, run: RunRow, journal: Sequence[JournalRow], latest: JournalRow | None
+        self, run: RunRow, journal: Sequence[CallRow], latest: CallRow | None
     ) -> None:
-        if run.snapshot_hash is None or run.started_at is None:
-            raise RuntimeError(f"run {run.id} has no workflow snapshot or start time")
+        if run.started_at is None:
+            raise RuntimeError(f"running run {run.id} has no start time")
         workflow = await self._load_workflow(run.snapshot_hash, run.workflow)
         outcome = engine.replay(
             workflow, core.Run(run.id, run.work), run.started_at, journal
@@ -127,7 +127,7 @@ class Orchestrator:
                 await self._advance(run, call, latest)
 
     async def _advance(
-        self, run: RunRow, call: engine.PendingCall, latest: JournalRow | None
+        self, run: RunRow, call: engine.PendingCall, latest: CallRow | None
     ) -> None:
         if call.entry is not None and call.entry.status == "cancelled":
             await self._end_run(run, latest, "cancelled", None)
@@ -136,13 +136,13 @@ class Orchestrator:
         else:
             await self._wait(run, call)
 
-    async def _cancel_running(self, run: RunRow, latest: JournalRow | None) -> None:
+    async def _cancel_running(self, run: RunRow, latest: CallRow | None) -> None:
         if latest is not None and latest.status == "running":
             if latest.kind == "step":
                 await self._runner.stop_step(latest.id)
             # False means the step posted a result just before it was stopped,
             # and the internal API has already put that on the timeline.
-            if await self._store.finish_journal_row(latest.id, "cancelled"):
+            if await self._store.finish_call(latest.id, "cancelled"):
                 await self._store.append_event(
                     run.id, "state", f"{_label(latest)} cancelled", latest.id
                 )
@@ -157,7 +157,7 @@ class Orchestrator:
         if await self._store.count_running_steps() >= self._config.max_concurrent_steps:
             return
         token = secrets.token_urlsafe(32)
-        step_run = await self._store.create_journal_row(
+        step_run = await self._store.create_call(
             run.id,
             call.position,
             "step",
@@ -198,16 +198,13 @@ class Orchestrator:
     async def _wait(self, run: RunRow, call: engine.PendingCall) -> None:
         entry = call.entry
         if entry is None:
-            # Nothing authenticates as a wait, but the column is required, so
-            # it holds the hash of a token that is never handed out.
-            entry = await self._store.create_journal_row(
+            entry = await self._store.create_call(
                 run.id,
                 call.position,
                 "wait",
                 call.name,
                 function=call.function,
                 args=call.args,
-                token_hash=hash_token(secrets.token_urlsafe(32)),
             )
             await self._store.append_event(
                 run.id, "state", f"waiting on {call.name}", entry.id
@@ -234,7 +231,7 @@ class Orchestrator:
             raise
         if result is None:
             return
-        if await self._store.finish_journal_row(entry.id, "succeeded", result):
+        if await self._store.finish_call(entry.id, "succeeded", result):
             await self._store.append_event(
                 run.id, "state", f"{call.name} finished", entry.id
             )
@@ -251,7 +248,7 @@ class Orchestrator:
             raise RuntimeError(f"wait {call.name} in run {run.id} has no poll")
         return await asyncio.to_thread(call.poll, started_at)
 
-    async def _check_running_step(self, step_run: JournalRow) -> None:
+    async def _check_running_step(self, step_run: CallRow) -> None:
         state = await self._runner.step_state(step_run.id)
         if state is ContainerState.RUNNING:
             limit = timedelta(minutes=self._config.step_timeout_minutes)
@@ -269,11 +266,11 @@ class Orchestrator:
                 step_run, "step container exited without reporting a result"
             )
 
-    async def _fail_step(self, step_run: JournalRow, error: str) -> None:
+    async def _fail_step(self, step_run: CallRow, error: str) -> None:
         # The run carries on: the next replay raises StepFailed in the
         # workflow, which may catch it. False means the step posted a result
         # first; the next tick acts on it.
-        if await self._store.finish_journal_row(step_run.id, "failed", error=error):
+        if await self._store.finish_call(step_run.id, "failed", error=error):
             await self._store.append_event(
                 step_run.run_id,
                 "state",
@@ -281,8 +278,8 @@ class Orchestrator:
                 step_run.id,
             )
 
-    async def _reload(self, step_run: JournalRow) -> JournalRow:
-        current = await self._store.get_journal_row(step_run.id)
+    async def _reload(self, step_run: CallRow) -> CallRow:
+        current = await self._store.get_call(step_run.id)
         if current is None:
             raise RuntimeError(f"step run {step_run.id} disappeared from the store")
         return current
@@ -290,7 +287,7 @@ class Orchestrator:
     async def _end_run(
         self,
         run: RunRow,
-        last: JournalRow | None,
+        last: CallRow | None,
         status: TerminalRunStatus,
         error: str | None,
     ) -> None:
@@ -305,5 +302,5 @@ class Orchestrator:
         await self._store.append_event(run.id, "state", message)
 
 
-def _label(step_run: JournalRow) -> str:
+def _label(step_run: CallRow) -> str:
     return f"step {step_run.name}" if step_run.kind == "step" else step_run.name

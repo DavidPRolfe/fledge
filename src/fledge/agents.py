@@ -1,12 +1,10 @@
 """Agents: a harness with a sandbox and a session that lasts the run."""
 
-import os
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from typing import overload
 
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue, PydanticSchemaGenerationError, TypeAdapter
 
 from fledge import engine
 from fledge.checks import (
@@ -19,15 +17,8 @@ from fledge.checks import (
 )
 from fledge.core import NO_SANDBOX, Repo, Sandbox, StepContext
 from fledge.engine import step
-from fledge.git import GITHUB_TOKEN_ENV
+from fledge.git import prepare_agent_git
 from fledge.harnesses.base import Harness, Turn
-
-_COMMIT_IDENTITY = {
-    "GIT_AUTHOR_NAME": "fledge",
-    "GIT_AUTHOR_EMAIL": "fledge@users.noreply.github.com",
-    "GIT_COMMITTER_NAME": "fledge",
-    "GIT_COMMITTER_EMAIL": "fledge@users.noreply.github.com",
-}
 
 
 @dataclass(frozen=True)
@@ -45,12 +36,47 @@ class TurnOutput:
 
 
 @dataclass(frozen=True)
+class AgentRef:
+    """An agent as a step container receives it: enough to rebuild its harness."""
+
+    name: str
+    harness_type: str
+    """`module:qualname` of the harness class."""
+    harness: JsonValue
+    """The harness instance, dumped by pydantic."""
+
+
+@dataclass(frozen=True)
 class Agent:
-    """Define agents at module level, with names unique in the workflows directory."""
+    """A named harness. The name keys the agent's session, so two agents that
+    one run prompts need different names.
+
+    The harness must be an instance of a module-level dataclass or Pydantic
+    model: the step container rebuilds it from its fields.
+    """
 
     name: str
     harness: Harness
     sandbox: Sandbox = NO_SANDBOX
+
+    def __post_init__(self) -> None:
+        self._ref()
+
+    def _ref(self) -> AgentRef:
+        harness_type = type(self.harness)
+        try:
+            adapter: TypeAdapter[object] = TypeAdapter(harness_type)
+        except PydanticSchemaGenerationError as err:
+            raise TypeError(
+                f"the harness of agent {self.name!r} must be a dataclass or "
+                f"Pydantic model so that a step container can rebuild it, "
+                f"got {harness_type.__qualname__}"
+            ) from err
+        return AgentRef(
+            self.name,
+            engine.ref(harness_type),
+            adapter.dump_python(self.harness, mode="json"),
+        )
 
     @overload
     def prompt(self, prompt: str | Feedback, repo: Repo) -> str: ...
@@ -65,17 +91,17 @@ class Agent:
     ) -> str | T:
         """Run the agent in `repo` until it yields.
 
-        Returns its final message, or with `returns` (a module-level dataclass
-        or Pydantic model) the value of that type it finished with.
+        Returns its final message, or with `returns` (a dataclass or Pydantic
+        model) the value of that type it finished with.
         """
         text = render_feedback(prompt) if isinstance(prompt, Feedback) else prompt
         output = run_turn.call_as(
             self.name,
             self.sandbox,
-            self.name,
+            self._ref(),
             text,
             repo,
-            None if returns is None else engine.ref(returns),
+            None if returns is None else TypeAdapter(returns).json_schema(),
         )
         if returns is None:
             return output.message
@@ -110,37 +136,29 @@ def _guidance_prompt(bodies: list[str]) -> str:
     )
 
 
-def _prepare_git() -> None:
-    """Let the agent commit, and push with the configured token.
-
-    The credential helper goes in the container's own git config, so the token
-    is never written to the workspace.
-    """
-    for name, value in _COMMIT_IDENTITY.items():
-        os.environ.setdefault(name, value)
-    if os.environ.get(GITHUB_TOKEN_ENV):
-        subprocess.run(
-            ["gh", "auth", "setup-git"],  # noqa: S607 - gh is resolved from PATH in the step image
-            check=True,
-        )
-
-
 @step
 def run_turn(
-    ctx: StepContext, agent: str, prompt: str, repo: Repo, returns: str | None
+    ctx: StepContext,
+    agent: AgentRef,
+    prompt: str,
+    repo: Repo,
+    schema: dict[str, JsonValue] | None,
 ) -> TurnOutput:
-    """Prompt the named agent, then keep going while guidance is waiting."""
-    harness = ctx.harness(agent)
-    schema: dict[str, JsonValue] | None = None
-    if returns is not None:
-        schema = TypeAdapter(engine.resolve_type(returns)).json_schema()
+    """Prompt the agent, then keep going while guidance is waiting.
+
+    `schema` is the JSON Schema its final answer must satisfy, if any.
+    """
+    adapter: TypeAdapter[object] = TypeAdapter(engine.resolve_type(agent.harness_type))
+    harness = adapter.validate_python(agent.harness)
+    if not isinstance(harness, Harness):
+        raise TypeError(f"{agent.harness_type} is not a harness")
     # Outside every repository, so an agent's session never ends up in a commit.
-    home = ctx.workspace / "agents" / agent
+    home = ctx.workspace / "agents" / agent.name
     state_dir = home / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     session_file = home / "session"
     session_id = session_file.read_text() if session_file.exists() else None
-    _prepare_git()
+    prepare_agent_git()
     while True:
         turn = harness.run_turn(
             Turn(prompt, repo.path, state_dir, session_id, schema), ctx.agent_event
@@ -153,5 +171,5 @@ def run_turn(
         ctx.log(f"delivering {len(guidance)} guidance message(s) to the agent")
         prompt = _guidance_prompt(guidance)
     if schema is not None and turn.structured is None:
-        raise RuntimeError(f"agent {agent} finished without a structured result")
+        raise RuntimeError(f"agent {agent.name} finished without a structured result")
     return TurnOutput(turn.final_message, turn.structured)

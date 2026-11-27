@@ -2,7 +2,7 @@
 
 The functions that talk to GitHub take an httpx.Client, so that tests can give
 them one with a mock transport; the steps and waits around them build the
-real client from GITHUB_TOKEN.
+real client with api.client from GITHUB_TOKEN.
 """
 
 import logging
@@ -150,12 +150,6 @@ class _ReviewComment(BaseModel):
     created_at: datetime
 
 
-class _IssueComment(BaseModel):
-    user: api.User
-    body: str
-    created_at: datetime
-
-
 class _GraphQLError(BaseModel):
     message: str
 
@@ -167,7 +161,7 @@ class _GraphQLResponse(BaseModel):
 _PULLS = TypeAdapter(list[_PullRequest])
 _REVIEWS = TypeAdapter(list[_Review])
 _REVIEW_COMMENTS = TypeAdapter(list[_ReviewComment])
-_ISSUE_COMMENTS = TypeAdapter(list[_IssueComment])
+_ISSUE_COMMENTS = TypeAdapter(list[api.IssueComment])
 
 
 def _github_repo(repo_url: str) -> tuple[str, str]:
@@ -178,25 +172,6 @@ def _github_repo(repo_url: str) -> tuple[str, str]:
             "(expected https://github.com/<owner>/<repo>)"
         )
     return match["owner"], match["repo"]
-
-
-def github_client(token: str) -> httpx.Client:
-    return httpx.Client(
-        base_url=api.API_URL,
-        headers=api.headers(token),
-    )
-
-
-def _get_pages(client: httpx.Client, path: str, params: dict[str, str]) -> list[bytes]:
-    pages: list[bytes] = []
-    response = client.get(path, params={**params, "per_page": "100"})
-    while True:
-        response.raise_for_status()
-        pages.append(response.content)
-        next_url = response.links.get("next", {}).get("url")
-        if next_url is None:
-            return pages
-        response = client.get(next_url)
 
 
 def _open_prompt(repo: Repo, ticket_url: str, *, draft: bool) -> str:
@@ -257,7 +232,7 @@ def find_pull_request(client: httpx.Client, repo: Repo) -> PullRequest:
     """The one open pull request from the repository's working branch."""
     owner, name = _github_repo(repo.url)
     head = f"{owner}:{repo.branch}"
-    pages = _get_pages(
+    pages = api.get_pages(
         client, f"/repos/{owner}/{name}/pulls", {"head": head, "state": "open"}
     )
     found = [pull for page in pages for pull in _PULLS.validate_json(page)]
@@ -272,7 +247,7 @@ def find_pull_request(client: httpx.Client, repo: Repo) -> PullRequest:
 def verify_opened(ctx: StepContext, repo: Repo) -> PullRequest:
     token = api.token()
     check_pushed(repo, token)
-    with github_client(token) as client:
+    with api.client(token) as client:
         pull = find_pull_request(client, repo)
     ctx.log(f"verified {repo.branch} is pushed and {pull.url} is open")
     return pull
@@ -323,7 +298,7 @@ def ready_for_review(client: httpx.Client, pr: PullRequest) -> None:
 
 @step
 def mark_ready(ctx: StepContext, pr: PullRequest) -> None:
-    with github_client(api.token()) as client:
+    with api.client(api.token()) as client:
         ready_for_review(client, pr)
     ctx.log(f"marked {pr.url} ready for review")
 
@@ -377,13 +352,13 @@ def _actions_check_runs(
     run is still going (it may not have created all its jobs yet)."""
     workflow_runs = [
         run
-        for page in _get_pages(client, f"{repo}/actions/runs", {"head_sha": sha})
+        for page in api.get_pages(client, f"{repo}/actions/runs", {"head_sha": sha})
         for run in _WorkflowRunPage.model_validate_json(page).workflow_runs
     ]
     jobs = [
         job
         for run in workflow_runs
-        for page in _get_pages(client, f"{repo}/actions/runs/{run.id}/jobs", {})
+        for page in api.get_pages(client, f"{repo}/actions/runs/{run.id}/jobs", {})
         for job in _JobPage.model_validate_json(page).jobs
     ]
     # An Actions job and its check run share an id, so the log lookup works.
@@ -407,7 +382,7 @@ def _check_runs(
 ) -> tuple[list[_CheckRun], bool]:
     """The commit's check runs, and whether more are known to be coming."""
     try:
-        pages = _get_pages(client, f"{repo}/commits/{sha}/check-runs", {})
+        pages = api.get_pages(client, f"{repo}/commits/{sha}/check-runs", {})
     except httpx.HTTPStatusError as err:
         if err.response.status_code != httpx.codes.FORBIDDEN:
             raise
@@ -433,7 +408,7 @@ def _ci(client: httpx.Client, pr: PullRequest, sha: str) -> _Ci:
     runs, more_coming = _check_runs(client, f"/repos/{owner}/{name}", sha)
     statuses = [
         status
-        for page in _get_pages(client, f"{commit}/status", {})
+        for page in api.get_pages(client, f"{commit}/status", {})
         for status in _CombinedStatusPage.model_validate_json(page).statuses
     ]
     failures = [
@@ -478,7 +453,7 @@ def _review_feedback(
     owner, name = _github_repo(pr.repo.url)
     pull = f"/repos/{owner}/{name}/pulls/{pr.number}"
     found: list[tuple[datetime, api.User, str]] = []
-    for page in _get_pages(client, f"{pull}/reviews", {}):
+    for page in api.get_pages(client, f"{pull}/reviews", {}):
         for review in _REVIEWS.validate_json(page):
             body = (review.body or "").strip()
             if review.submitted_at is None or review.submitted_at <= since:
@@ -491,7 +466,7 @@ def _review_feedback(
                 found.append((review.submitted_at, review.user, body))
     # GitHub's `since` filters on updated_at; created_at is checked below so
     # edits to old comments are not delivered again.
-    for page in _get_pages(client, f"{pull}/comments", {"since": since.isoformat()}):
+    for page in api.get_pages(client, f"{pull}/comments", {"since": since.isoformat()}):
         for comment in _REVIEW_COMMENTS.validate_json(page):
             if comment.created_at <= since:
                 continue
@@ -501,7 +476,7 @@ def _review_feedback(
                 (comment.created_at, comment.user, f"On {where}:\n{comment.body}")
             )
     issue_comments = f"/repos/{owner}/{name}/issues/{pr.number}/comments"
-    for page in _get_pages(client, issue_comments, {"since": since.isoformat()}):
+    for page in api.get_pages(client, issue_comments, {"since": since.isoformat()}):
         found.extend(
             (comment.created_at, comment.user, comment.body)
             for comment in _ISSUE_COMMENTS.validate_json(page)
@@ -537,12 +512,12 @@ def review_verdict(client: httpx.Client, pr: PullRequest, since: datetime) -> Ve
 def checks_green(ctx: WaitContext, pr: PullRequest) -> Verdict:
     """Passes when the pull request's checks pass; feedback when one fails."""
     # The one place a check reads the real clock: waits may, workflow bodies may not.
-    with github_client(api.token()) as client:
+    with api.client(api.token()) as client:
         return ci_verdict(client, pr, ctx.started_at, datetime.now(UTC))
 
 
 @wait
 def merged(ctx: WaitContext, pr: PullRequest) -> Verdict:
     """Passes when the pull request is merged; feedback for reviews and failures."""
-    with github_client(api.token()) as client:
+    with api.client(api.token()) as client:
         return review_verdict(client, pr, ctx.since)

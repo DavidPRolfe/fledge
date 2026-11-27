@@ -42,13 +42,13 @@ class Poller:
     async def _poll_trigger(
         self, name: str, binding: TriggerBinding, runs: list[RunRow]
     ) -> None:
-        for item in await binding.trigger.poll():
+        for item in await asyncio.to_thread(binding.trigger.poll):
             run = await self._store.create_polled_run(binding.workflow, item)
             if run is not None:
                 logger.info("created run %s for %s %r", run.id, name, item.external_id)
         for run in runs:
-            comments = await binding.trigger.poll_guidance(
-                run.external_id, since=run.created_at
+            comments = await asyncio.to_thread(
+                binding.trigger.poll_guidance, run.external_id, run.created_at
             )
             for comment in comments:
                 await self._store.add_guidance(

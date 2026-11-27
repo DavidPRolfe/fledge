@@ -8,7 +8,7 @@ import pytest
 from pydantic import JsonValue
 
 from fledge import engine
-from fledge.control.store import JournalRow, StepStatus
+from fledge.control.store import CallRow, CallStatus
 from fledge.core import Run, Sandbox, Service, StepContext, WorkItem
 from fledge.engine import (
     Cancelled,
@@ -24,7 +24,6 @@ from fledge.engine import (
     workflow,
 )
 from fledge.github import GitHubIssues
-from fledge.harnesses.base import Harness
 
 START = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 WORK = WorkItem(
@@ -51,17 +50,17 @@ def finished_at(position: int) -> datetime:
     return START + timedelta(minutes=position + 1)
 
 
-def entry(run: Run, call: PendingCall, result: Result) -> JournalRow:
+def entry(run: Run, call: PendingCall, result: Result) -> CallRow:
     if isinstance(result, Fails):
-        status: StepStatus = "failed"
+        status: CallStatus = "failed"
         value: JsonValue = None
         error: str | None = result.error
     else:
         status, value, error = "succeeded", result, None
-    return JournalRow(
+    return CallRow(
         id=uuid4(),
         run_id=run.id,
-        step_index=call.position,
+        position=call.position,
         kind=call.kind,
         name=call.name,
         function=call.function,
@@ -80,7 +79,7 @@ def drive(
 ) -> tuple[Outcome, list[PendingCall]]:
     """Replay `flow`, recording each result for the call it suspends on."""
     run = Run(uuid4(), WORK)
-    journal: list[JournalRow] = []
+    journal: list[CallRow] = []
     calls: list[PendingCall] = []
     for result in results:
         outcome = engine.replay(flow, run, START, journal)
@@ -105,9 +104,6 @@ class FakeContext:
 
     def claim_guidance(self) -> list[str]:
         return []
-
-    def harness(self, agent: str) -> Harness:
-        raise KeyError(agent)
 
 
 @dataclass(frozen=True)
@@ -324,10 +320,10 @@ def test_the_journal_entry_of_a_started_call_is_on_the_pending_call() -> None:
     run = Run(uuid4(), WORK)
     first = engine.replay(flow, run, START, [])
     assert isinstance(first, Suspended)
-    running = JournalRow(
+    running = CallRow(
         id=uuid4(),
         run_id=run.id,
-        step_index=0,
+        position=0,
         kind="step",
         name="double",
         function="test_engine:double",

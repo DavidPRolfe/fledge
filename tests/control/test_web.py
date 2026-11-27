@@ -7,7 +7,7 @@ import pytest
 from pydantic import JsonValue
 
 from fledge.control.snapshots import TriggerBinding
-from fledge.control.store import JournalRow, RunRow, Store, WorkflowRef, hash_token
+from fledge.control.store import CallRow, RunRow, Store, WorkflowRef, hash_token
 from fledge.control.web.app import create_app
 from fledge.core import WorkItem
 from fledge.triggers import Comment
@@ -33,20 +33,18 @@ class FakeTrigger:
     def __init__(self, items: dict[str, WorkItem]) -> None:
         self.items = items
 
-    async def check(self) -> None:
+    def check(self) -> None:
         pass
 
-    async def poll(self) -> list[WorkItem]:
+    def poll(self) -> list[WorkItem]:
         return list(self.items.values())
 
-    async def fetch(self, ref: str) -> WorkItem:
+    def fetch(self, ref: str) -> WorkItem:
         if ref not in self.items:
             raise ValueError(f"no issue {ref}")
         return self.items[ref]
 
-    async def poll_guidance(
-        self, item_external_id: str, since: datetime
-    ) -> list[Comment]:
+    def poll_guidance(self, item_external_id: str, since: datetime) -> list[Comment]:
         return []
 
 
@@ -76,9 +74,9 @@ async def make_step(
     index: int = 0,
     name: str = "clone_repo",
     args: dict[str, JsonValue] | None = None,
-) -> tuple[JournalRow, str]:
+) -> tuple[CallRow, str]:
     token = f"token-{uuid4()}"
-    step = await store.create_journal_row(
+    step = await store.create_call(
         run.id,
         index,
         kind="step",
@@ -140,7 +138,7 @@ async def test_get_run_includes_steps_and_guidance(
 ) -> None:
     run = await make_run(store)
     step, _ = await make_step(store, run)
-    await store.finish_journal_row(step.id, "succeeded", {"branch": "fledge/1"})
+    await store.finish_call(step.id, "succeeded", {"branch": "fledge/1"})
     await store.add_guidance(run.id, "web", "web", "first")
     await store.claim_guidance(run.id)
     await store.add_guidance(run.id, "trigger", "alice", "second", external_id="c1")
@@ -149,7 +147,7 @@ async def test_get_run_includes_steps_and_guidance(
     assert response.status_code == 200
     body = response.json()
     assert body["run"]["id"] == str(run.id)
-    [step_out] = body["steps"]
+    [step_out] = body["calls"]
     assert step_out["name"] == "clone_repo"
     assert step_out["kind"] == "step"
     assert step_out["status"] == "succeeded"
@@ -266,11 +264,27 @@ async def test_internal_routes_require_the_step_token(
         method, f"/internal/step-runs/{step.id}{suffix}", json=payload, headers=headers
     )
     assert response.status_code == 401
-    refreshed = await store.get_journal_row(step.id)
+    refreshed = await store.get_call(step.id)
     assert refreshed is not None
     assert refreshed.status == "running"
     [guidance] = await store.list_guidance(run.id)
     assert guidance.delivered_at is None
+
+
+async def test_a_wait_has_no_token_to_authenticate_with(
+    client: httpx.AsyncClient, store: Store
+) -> None:
+    run = await make_run(store)
+    wait = await store.create_call(
+        run.id, 0, "wait", "merged", function="fledge.github.pulls:merged", args={}
+    )
+    assert wait.token_hash is None
+
+    response = await client.get(
+        f"/internal/step-runs/{wait.id}", headers=bearer("anything")
+    )
+
+    assert response.status_code == 401
 
 
 async def test_internal_unknown_step_run_is_404(client: httpx.AsyncClient) -> None:
@@ -283,7 +297,7 @@ async def test_internal_context_has_the_calls_function_and_arguments(
 ) -> None:
     run = await make_run(store)
     clone, _ = await make_step(store, run, 0, "clone_repo")
-    await store.finish_journal_row(clone.id, "succeeded", {"branch": "fledge/1"})
+    await store.finish_call(clone.id, "succeeded", {"branch": "fledge/1"})
     implement, token = await make_step(
         store, run, 1, "run_turn", {"agent": "implementer", "prompt": "Fix it"}
     )
@@ -324,7 +338,7 @@ async def test_internal_events_are_stored(
     )
     assert response.status_code == 204
     events = await store.list_events(run.id)
-    assert [(e.kind, e.message, e.step_run_id) for e in events] == [
+    assert [(e.kind, e.message, e.call_id) for e in events] == [
         ("log", "cloning", step.id),
         ("agent", "thinking", step.id),
     ]
@@ -373,7 +387,7 @@ async def test_internal_result_is_recorded_once_with_a_state_event(
 
     response = await client.post(url, json=result, headers=bearer(token))
     assert response.status_code == 204
-    finished = await store.get_journal_row(step.id)
+    finished = await store.get_call(step.id)
     assert finished is not None
     assert (finished.status, finished.result, finished.error) == (
         result["status"],
@@ -381,7 +395,7 @@ async def test_internal_result_is_recorded_once_with_a_state_event(
         result.get("error"),
     )
     events = await store.list_events(run.id)
-    assert [(e.kind, e.message, e.step_run_id) for e in events] == [
+    assert [(e.kind, e.message, e.call_id) for e in events] == [
         ("state", event, step.id)
     ]
 
@@ -389,7 +403,7 @@ async def test_internal_result_is_recorded_once_with_a_state_event(
         url, json={"status": "succeeded", "result": "late"}, headers=bearer(token)
     )
     assert response.status_code == 409
-    unchanged = await store.get_journal_row(step.id)
+    unchanged = await store.get_call(step.id)
     assert unchanged == finished
     assert len(await store.list_events(run.id)) == 1
 
@@ -420,7 +434,7 @@ async def test_run_page_renders_calls_and_guidance(
     ]
     for index, result in enumerate(results):
         step, _ = await make_step(store, run, index, f"call_{index}")
-        await store.finish_journal_row(step.id, "succeeded", result)
+        await store.finish_call(step.id, "succeeded", result)
     await store.add_guidance(run.id, "web", "web", "<b>bold</b>")
 
     response = await client.get(f"/runs/{run.id}")
@@ -532,7 +546,7 @@ async def test_live_fragment_appends_new_events_and_polls_while_active(
     assert '<div hx-swap-oob="beforeend:#events"><div>' in live
     assert "[log] &lt;b&gt;</div>" in live
     assert "[log] a</div>" not in live
-    assert '<table id="steps" hx-swap-oob="true">' in live
+    assert '<table id="calls" hx-swap-oob="true">' in live
 
     await store.finish_run(run.id, "succeeded")
     live = (await client.get(f"/runs/{run.id}/live?after={second.id}")).text

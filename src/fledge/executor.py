@@ -4,7 +4,7 @@ import logging
 import os
 import socket
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -14,9 +14,7 @@ import httpx
 from pydantic import JsonValue
 
 from fledge import engine
-from fledge.agents import Agent
 from fledge.core import WorkItem
-from fledge.harnesses.base import Harness
 from fledge.wire import (
     API_URL_ENV,
     READY_PORTS_ENV,
@@ -116,7 +114,6 @@ class ExecutorContext:
     work: WorkItem
     workspace: Path
     control_plane: ControlPlane
-    agents: Mapping[str, Agent]
 
     def log(self, message: str) -> None:
         self.control_plane.post_event("log", message)
@@ -126,11 +123,6 @@ class ExecutorContext:
 
     def claim_guidance(self) -> list[str]:
         return self.control_plane.claim_guidance()
-
-    def harness(self, agent: str) -> Harness:
-        if agent not in self.agents:
-            raise LookupError(f"the run's workflow code defines no agent {agent!r}")
-        return self.agents[agent].harness
 
 
 def wait_for_services(addresses: Sequence[str], policy: ReadyPolicy) -> None:
@@ -159,14 +151,13 @@ def _run_step(
 ) -> JsonValue:
     # Loading the snapshot is what makes its package importable, so it has to
     # happen before the step's function is resolved.
-    loaded = load_workflows(run.workflow_files)
+    load_workflows(run.workflow_files)
     step = engine.resolve_step(run.function)
     ctx = ExecutorContext(
         run_id=run.run_id,
         work=run.work,
         workspace=workspace,
         control_plane=control_plane,
-        agents=loaded.agents,
     )
     ready_ports = os.environ.get(READY_PORTS_ENV)
     if ready_ports:

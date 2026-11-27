@@ -25,7 +25,7 @@ from fledge.checks import (
     until,
     wait,
 )
-from fledge.control.store import JournalRow
+from fledge.control.store import CallRow
 from fledge.core import Repo, Run, Sandbox, StepContext, WorkItem
 from fledge.engine import (
     Cancelled,
@@ -39,7 +39,6 @@ from fledge.engine import (
     workflow,
 )
 from fledge.github import GitHubIssues
-from fledge.harnesses.base import Harness
 
 START = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 WORK = WorkItem(
@@ -62,11 +61,11 @@ def finished_at(position: int) -> datetime:
     return START + timedelta(minutes=position + 1)
 
 
-def entry(run: Run, call: PendingCall, result: JsonValue) -> JournalRow:
-    return JournalRow(
+def entry(run: Run, call: PendingCall, result: JsonValue) -> CallRow:
+    return CallRow(
         id=uuid4(),
         run_id=run.id,
-        step_index=call.position,
+        position=call.position,
         kind=call.kind,
         name=call.name,
         function=call.function,
@@ -85,7 +84,7 @@ def drive(
 ) -> tuple[Outcome, list[PendingCall]]:
     """Replay `flow`, recording each result for the call it suspends on."""
     run = Run(uuid4(), WORK)
-    journal: list[JournalRow] = []
+    journal: list[CallRow] = []
     calls: list[PendingCall] = []
     for result in results:
         outcome = engine.replay(flow, run, START, journal)
@@ -109,9 +108,6 @@ class FakeContext:
 
     def claim_guidance(self) -> list[str]:
         return []
-
-    def harness(self, agent: str) -> Harness:
-        raise KeyError(agent)
 
 
 @check
@@ -280,7 +276,7 @@ def test_within_runs_the_check_with_another_sandbox() -> None:
     assert outcome.call.function == "test_checks:file_exists"
 
 
-def suspended_wait(flow: Workflow, journal: list[JournalRow], run: Run) -> PendingCall:
+def suspended_wait(flow: Workflow, journal: list[CallRow], run: Run) -> PendingCall:
     outcome = engine.replay(flow, run, START, journal)
     assert isinstance(outcome, Suspended)
     assert outcome.call.kind == "wait"
@@ -334,7 +330,7 @@ def test_since_is_the_loop_start_then_when_feedback_was_recorded(
             fix(attempt + 1)
 
     run = Run(uuid4(), WORK)
-    journal: list[JournalRow] = []
+    journal: list[CallRow] = []
     outcome = engine.replay(flow, run, START, journal)
     assert isinstance(outcome, Suspended)
     journal.append(entry(run, outcome.call, 0))

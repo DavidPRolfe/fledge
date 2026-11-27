@@ -1,4 +1,4 @@
-"""Postgres persistence for runs, step runs, events, guidance and workflow snapshots."""
+"""Postgres persistence for runs, their calls, events, guidance and workflow snapshots."""
 
 import hashlib
 from collections.abc import Mapping, Sequence
@@ -15,13 +15,13 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import JsonValue, TypeAdapter
 
 from fledge.core import WorkItem
+from fledge.engine import CallKind
 
 RunOrigin = Literal["poll", "manual"]
 RunStatus = Literal["pending", "running", "succeeded", "failed", "cancelled"]
 TerminalRunStatus = Literal["succeeded", "failed", "cancelled"]
-CallKind = Literal["step", "wait"]
-StepStatus = Literal["running", "succeeded", "failed", "cancelled"]
-TerminalStepStatus = Literal["succeeded", "failed", "cancelled"]
+CallStatus = Literal["running", "succeeded", "failed", "cancelled"]
+TerminalCallStatus = Literal["succeeded", "failed", "cancelled"]
 EventKind = Literal["log", "agent", "state"]
 GuidanceSource = Literal["web", "trigger"]
 
@@ -50,8 +50,7 @@ class RunRow:
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
-    snapshot_hash: str | None
-    """None only for runs created before workflows were snapshotted."""
+    snapshot_hash: str
 
     @property
     def work(self) -> WorkItem:
@@ -65,22 +64,23 @@ class RunRow:
 
 
 @dataclass(frozen=True)
-class JournalRow:
+class CallRow:
     """One call a workflow made: a row of the run's journal."""
 
     id: UUID
     run_id: UUID
-    step_index: int
+    position: int
     """The call's position among the calls of its run, from 0."""
     kind: CallKind
     name: str
     function: str
     """`module:qualname` of the step or wait function."""
     args: dict[str, JsonValue]
-    status: StepStatus
+    status: CallStatus
     result: JsonValue
     error: str | None
-    token_hash: str
+    token_hash: str | None
+    """Of the token a step's container authenticates with. None for a wait."""
     started_at: datetime
     finished_at: datetime | None
 
@@ -89,7 +89,7 @@ class JournalRow:
 class Event:
     id: int
     run_id: UUID
-    step_run_id: UUID | None
+    call_id: UUID | None
     at: datetime
     kind: EventKind
     message: str
@@ -114,10 +114,32 @@ def _columns(row_type: type) -> sql.Composed:
 
 
 _RUN = _columns(RunRow)
-_JOURNAL_ROW = _columns(JournalRow)
+_CALL = _columns(CallRow)
 _EVENT = _columns(Event)
 _GUIDANCE = _columns(Guidance)
 _FILES = TypeAdapter(dict[str, str])
+
+
+_INSERT_RUN = sql.SQL(
+    "INSERT INTO runs (origin, workflow, snapshot_hash, "
+    "external_id, title, body, url, repo_url) "
+    "SELECT %s, %s, %s, %s, %s, %s, %s, %s"
+)
+
+
+def _run_values(
+    origin: RunOrigin, workflow: WorkflowRef, work: WorkItem
+) -> tuple[str, ...]:
+    return (
+        origin,
+        workflow.name,
+        workflow.snapshot_hash,
+        work.external_id,
+        work.title,
+        work.body,
+        work.url,
+        work.repo_url,
+    )
 
 
 def hash_token(token: str) -> str:
@@ -174,20 +196,8 @@ class Store:
             conn.cursor(row_factory=class_row(RunRow)) as cur,
         ):
             await cur.execute(
-                sql.SQL(
-                    "INSERT INTO runs (external_id, origin, workflow, "
-                    "snapshot_hash, title, body, url, repo_url) "
-                    "VALUES (%s, 'manual', %s, %s, %s, %s, %s, %s) RETURNING {}"
-                ).format(_RUN),
-                (
-                    work.external_id,
-                    workflow.name,
-                    workflow.snapshot_hash,
-                    work.title,
-                    work.body,
-                    work.url,
-                    work.repo_url,
-                ),
+                sql.SQL("{} RETURNING {}").format(_INSERT_RUN, _RUN),
+                _run_values("manual", workflow, work),
             )
             return _one(await cur.fetchone())
 
@@ -214,24 +224,11 @@ class Store:
             )
             await cur.execute(
                 sql.SQL(
-                    "INSERT INTO runs (external_id, origin, workflow, "
-                    "snapshot_hash, title, body, url, repo_url) "
-                    "SELECT %s, 'poll', %s, %s, %s, %s, %s, %s "
-                    "WHERE NOT EXISTS ("
+                    "{} WHERE NOT EXISTS ("
                     "SELECT 1 FROM runs WHERE workflow = %s AND external_id = %s) "
                     "RETURNING {}"
-                ).format(_RUN),
-                (
-                    work.external_id,
-                    workflow.name,
-                    workflow.snapshot_hash,
-                    work.title,
-                    work.body,
-                    work.url,
-                    work.repo_url,
-                    workflow.name,
-                    work.external_id,
-                ),
+                ).format(_INSERT_RUN, _RUN),
+                (*_run_values("poll", workflow, work), workflow.name, work.external_id),
             )
             return await cur.fetchone()
 
@@ -305,73 +302,73 @@ class Store:
             )
             return cur.rowcount == 1
 
-    async def create_journal_row(  # noqa: PLR0913 - one argument per column
+    async def create_call(  # noqa: PLR0913 - one argument per column
         self,
         run_id: UUID,
-        step_index: int,
+        position: int,
         kind: CallKind,
         name: str,
         *,
         function: str,
         args: dict[str, JsonValue],
-        token_hash: str,
-    ) -> JournalRow:
+        token_hash: str | None = None,
+    ) -> CallRow:
         async with (
             self._pool.connection() as conn,
-            conn.cursor(row_factory=class_row(JournalRow)) as cur,
+            conn.cursor(row_factory=class_row(CallRow)) as cur,
         ):
             await cur.execute(
                 sql.SQL(
-                    "INSERT INTO step_runs "
-                    "(run_id, step_index, kind, name, function, args, token_hash) "
+                    "INSERT INTO calls "
+                    "(run_id, position, kind, name, function, args, token_hash) "
                     "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING {}"
-                ).format(_JOURNAL_ROW),
-                (run_id, step_index, kind, name, function, Jsonb(args), token_hash),
+                ).format(_CALL),
+                (run_id, position, kind, name, function, Jsonb(args), token_hash),
             )
             return _one(await cur.fetchone())
 
-    async def get_journal_row(self, step_run_id: UUID) -> JournalRow | None:
+    async def get_call(self, call_id: UUID) -> CallRow | None:
         async with (
             self._pool.connection() as conn,
-            conn.cursor(row_factory=class_row(JournalRow)) as cur,
+            conn.cursor(row_factory=class_row(CallRow)) as cur,
         ):
             await cur.execute(
-                sql.SQL("SELECT {} FROM step_runs WHERE id = %s").format(_JOURNAL_ROW),
-                (step_run_id,),
+                sql.SQL("SELECT {} FROM calls WHERE id = %s").format(_CALL),
+                (call_id,),
             )
             return await cur.fetchone()
 
-    async def list_journal(self, run_id: UUID) -> list[JournalRow]:
+    async def list_journal(self, run_id: UUID) -> list[CallRow]:
         """In call order."""
         async with (
             self._pool.connection() as conn,
-            conn.cursor(row_factory=class_row(JournalRow)) as cur,
+            conn.cursor(row_factory=class_row(CallRow)) as cur,
         ):
             await cur.execute(
                 sql.SQL(
-                    "SELECT {} FROM step_runs WHERE run_id = %s ORDER BY step_index"
-                ).format(_JOURNAL_ROW),
+                    "SELECT {} FROM calls WHERE run_id = %s ORDER BY position"
+                ).format(_CALL),
                 (run_id,),
             )
             return await cur.fetchall()
 
-    async def finish_journal_row(
+    async def finish_call(
         self,
-        step_run_id: UUID,
-        status: TerminalStepStatus,
+        call_id: UUID,
+        status: TerminalCallStatus,
         result: JsonValue = None,
         error: str | None = None,
     ) -> bool:
-        """Record the step's outcome if it is still running.
+        """Record the call's outcome if it is still running.
 
         False means an outcome was already recorded (for example a cancel or
         timeout) and this one was discarded.
         """
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                "UPDATE step_runs SET status = %s, result = %s, error = %s, "
+                "UPDATE calls SET status = %s, result = %s, error = %s, "
                 "finished_at = now() WHERE id = %s AND status = 'running'",
-                (status, Jsonb(result), error, step_run_id),
+                (status, Jsonb(result), error, call_id),
             )
             return cur.rowcount == 1
 
@@ -379,8 +376,7 @@ class Store:
         """Running calls of kind step across all runs: the step containers in use."""
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                "SELECT count(*) FROM step_runs "
-                "WHERE kind = 'step' AND status = 'running'"
+                "SELECT count(*) FROM calls WHERE kind = 'step' AND status = 'running'"
             )
             row = _one(await cur.fetchone())
         count: int = row[0]
@@ -391,16 +387,16 @@ class Store:
         run_id: UUID,
         kind: EventKind,
         message: str,
-        step_run_id: UUID | None = None,
+        call_id: UUID | None = None,
     ) -> Event:
-        [event] = await self.append_events(run_id, [(kind, message)], step_run_id)
+        [event] = await self.append_events(run_id, [(kind, message)], call_id)
         return event
 
     async def append_events(
         self,
         run_id: UUID,
         events: Sequence[tuple[EventKind, str]],
-        step_run_id: UUID | None = None,
+        call_id: UUID | None = None,
     ) -> list[Event]:
         """Insert events so their ids follow the given order. Returns them in that order."""
         if not events:
@@ -411,7 +407,7 @@ class Store:
         ):
             await cur.execute(
                 sql.SQL(
-                    "INSERT INTO events (run_id, step_run_id, kind, message) "
+                    "INSERT INTO events (run_id, call_id, kind, message) "
                     "SELECT %s, %s, e.kind, e.message "
                     "FROM unnest(%s::text[], %s::text[]) "
                     "WITH ORDINALITY AS e(kind, message, n) ORDER BY e.n "
@@ -419,7 +415,7 @@ class Store:
                 ).format(_EVENT),
                 (
                     run_id,
-                    step_run_id,
+                    call_id,
                     [kind for kind, _ in events],
                     [message for _, message in events],
                 ),

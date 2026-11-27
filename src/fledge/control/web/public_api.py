@@ -1,5 +1,6 @@
 """The public API used by the web view and the CLI. Unauthenticated in the MVP."""
 
+import asyncio
 from collections.abc import Mapping
 from typing import Annotated
 from uuid import UUID
@@ -33,7 +34,7 @@ async def launch_run(
             f"unknown workflow {body.workflow!r}",
         )
     try:
-        work = await binding.trigger.fetch(body.ref)
+        work = await asyncio.to_thread(binding.trigger.fetch, body.ref)
     except ValueError as err:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(err)) from err
     run = await store.create_manual_run(binding.workflow, work)

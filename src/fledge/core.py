@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
-from fledge.harnesses.base import Harness
-
 
 @dataclass(frozen=True)
 class WorkItem:
@@ -80,8 +78,4 @@ class StepContext(Protocol):
 
     def claim_guidance(self) -> list[str]:
         """Undelivered guidance for the run. Claiming marks it delivered."""
-        ...
-
-    def harness(self, agent: str) -> Harness:
-        """The harness of the agent of that name in the run's workflow code."""
         ...
