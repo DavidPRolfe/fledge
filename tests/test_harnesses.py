@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from pydantic import JsonValue, TypeAdapter
 
-from fledge.builtin.harnesses.claude_code import ClaudeCodeHarness
-from fledge.builtin.harnesses.codex import CodexHarness
-from fledge.core import Harness
+from fledge.core import Harness, Turn
+from fledge.harnesses import ClaudeCode, Codex
 
 FAKE_CLI = """\
 #!{python}
@@ -15,9 +15,22 @@ import json, os, sys
 from pathlib import Path
 
 here = Path(__file__).parent
-(here / "call.json").write_text(json.dumps(
-    {{"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin": sys.stdin.read()}}
-))
+argv = sys.argv[1:]
+schema = None
+if "--output-schema" in argv:
+    schema = json.loads(Path(argv[argv.index("--output-schema") + 1]).read_text())
+(here / "call.json").write_text(json.dumps({{
+    "argv": argv,
+    "cwd": os.getcwd(),
+    "stdin": sys.stdin.read(),
+    "env": {{
+        name: os.environ.get(name) for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")
+    }},
+    "schema": schema,
+}}))
+if (here / "fail_resume").exists() and ("--resume" in argv or "resume" in argv):
+    sys.stderr.write("No conversation found with that session ID\\n")
+    sys.exit(1)
 sys.stdout.write((here / "stdout.jsonl").read_text())
 sys.stderr.write("fake stderr\\n")
 sys.exit(int((here / "exit_code").read_text()))
@@ -28,15 +41,24 @@ sys.exit(int((here / "exit_code").read_text()))
 class FakeCli:
     path: Path
 
-    def call(self) -> dict[str, object]:
-        recorded: dict[str, object] = json.loads(
+    def call(self) -> dict[str, JsonValue]:
+        recorded: dict[str, JsonValue] = json.loads(
             (self.path.parent / "call.json").read_text()
         )
         return recorded
 
+    def argv(self) -> list[JsonValue]:
+        argv = self.call()["argv"]
+        assert isinstance(argv, list)
+        return argv
+
 
 def fake_cli(
-    tmp_path: Path, events: list[dict[str, object]], exit_code: int = 0
+    tmp_path: Path,
+    events: list[dict[str, JsonValue]],
+    exit_code: int = 0,
+    *,
+    fail_resume: bool = False,
 ) -> FakeCli:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -47,6 +69,8 @@ def fake_cli(
         "".join(json.dumps(event) + "\n" for event in events)
     )
     (bin_dir / "exit_code").write_text(str(exit_code))
+    if fail_resume:
+        (bin_dir / "fail_resume").touch()
     return FakeCli(script)
 
 
@@ -57,7 +81,16 @@ def workspace(tmp_path: Path) -> Path:
     return path
 
 
-CLAUDE_OK: list[dict[str, object]] = [
+def make_turn(
+    workspace: Path,
+    prompt: str = "go",
+    session_id: str | None = None,
+    schema: dict[str, JsonValue] | None = None,
+) -> Turn:
+    return Turn(prompt, workspace, workspace.parent / "state", session_id, schema)
+
+
+CLAUDE_OK: list[dict[str, JsonValue]] = [
     {"type": "system", "subtype": "init", "session_id": "sess-1", "tools": []},
     {
         "type": "assistant",
@@ -88,7 +121,7 @@ CLAUDE_OK: list[dict[str, object]] = [
     },
 ]
 
-CODEX_OK: list[dict[str, object]] = [
+CODEX_OK: list[dict[str, JsonValue]] = [
     {"type": "thread.started", "thread_id": "thread-1"},
     {"type": "turn.started"},
     {
@@ -139,22 +172,45 @@ CODEX_OK: list[dict[str, object]] = [
     },
 ]
 
+SCHEMA: dict[str, JsonValue] = {
+    "type": "object",
+    "properties": {"approved": {"type": "boolean"}},
+    "required": ["approved"],
+}
+ANSWER: JsonValue = {"approved": True}
+
+
+def claude_events(**result: JsonValue) -> list[dict[str, JsonValue]]:
+    return [*CLAUDE_OK[:-1], {**CLAUDE_OK[-1], **result}]
+
+
+def codex_events(final_message: str) -> list[dict[str, JsonValue]]:
+    return [
+        *CODEX_OK[:-2],
+        {
+            "type": "item.completed",
+            "item": {"id": "i3", "type": "agent_message", "text": final_message},
+        },
+        CODEX_OK[-1],
+    ]
+
 
 def test_harnesses_satisfy_protocol() -> None:
-    assert isinstance(ClaudeCodeHarness(), Harness)
-    assert isinstance(CodexHarness(), Harness)
+    assert isinstance(ClaudeCode(), Harness)
+    assert isinstance(Codex(), Harness)
 
 
 def test_claude_first_turn(tmp_path: Path, workspace: Path) -> None:
     cli = fake_cli(tmp_path, CLAUDE_OK)
     events: list[str] = []
 
-    result = ClaudeCodeHarness(str(cli.path)).run_turn(
-        workspace, "-fix the bug", None, events.append
+    result = ClaudeCode(executable=str(cli.path)).run_turn(
+        make_turn(workspace, "-fix the bug"), events.append
     )
 
     assert result.session_id == "sess-1"
     assert result.final_message == "All done."
+    assert result.structured is None
     assert events == ["Looking at the code.", "Bash: ls -la", "TodoWrite"]
     call = cli.call()
     assert call["stdin"] == "-fix the bug"
@@ -171,25 +227,24 @@ def test_claude_first_turn(tmp_path: Path, workspace: Path) -> None:
 def test_claude_resumed_turn(tmp_path: Path, workspace: Path) -> None:
     cli = fake_cli(tmp_path, CLAUDE_OK)
 
-    ClaudeCodeHarness(str(cli.path)).run_turn(
-        workspace, "more", "sess-1", lambda _: None
+    ClaudeCode(executable=str(cli.path)).run_turn(
+        make_turn(workspace, "more", "sess-1"), lambda _: None
     )
 
-    argv = cli.call()["argv"]
-    assert isinstance(argv, list)
-    assert argv[-2:] == ["--resume", "sess-1"]
+    assert cli.argv()[-2:] == ["--resume", "sess-1"]
 
 
 def test_codex_first_turn(tmp_path: Path, workspace: Path) -> None:
     cli = fake_cli(tmp_path, CODEX_OK)
     events: list[str] = []
 
-    result = CodexHarness(str(cli.path)).run_turn(
-        workspace, "-fix the bug", None, events.append
+    result = Codex(executable=str(cli.path)).run_turn(
+        make_turn(workspace, "-fix the bug"), events.append
     )
 
     assert result.session_id == "thread-1"
     assert result.final_message == "All done."
+    assert result.structured is None
     assert events == ["$ ls (exit 0)", "update a.py", "All done."]
     call = cli.call()
     assert call["stdin"] == "-fix the bug"
@@ -203,28 +258,235 @@ def test_codex_first_turn(tmp_path: Path, workspace: Path) -> None:
         str(workspace),
         "-",
     ]
+    assert call["schema"] is None
 
 
 def test_codex_resumed_turn(tmp_path: Path, workspace: Path) -> None:
     cli = fake_cli(tmp_path, CODEX_OK[1:])
 
-    result = CodexHarness(str(cli.path)).run_turn(
-        workspace, "more", "thread-1", lambda _: None
+    result = Codex(executable=str(cli.path)).run_turn(
+        make_turn(workspace, "more", "thread-1"), lambda _: None
     )
 
     assert result.session_id == "thread-1"
-    argv = cli.call()["argv"]
-    assert isinstance(argv, list)
+    argv = cli.argv()
     assert argv[-3:] == ["resume", "thread-1", "-"]
     assert argv[argv.index("-C") + 1] == str(workspace)
 
 
 @pytest.mark.parametrize(
+    ("harness_type", "events", "variable"),
+    [
+        (ClaudeCode, CLAUDE_OK, "CLAUDE_CONFIG_DIR"),
+        (Codex, CODEX_OK, "CODEX_HOME"),
+    ],
+)
+def test_state_dir_reaches_the_cli(
+    tmp_path: Path,
+    workspace: Path,
+    harness_type: type[ClaudeCode | Codex],
+    events: list[dict[str, JsonValue]],
+    variable: str,
+) -> None:
+    cli = fake_cli(tmp_path, events)
+
+    harness_type(executable=str(cli.path)).run_turn(
+        make_turn(workspace), lambda _: None
+    )
+
+    env = cli.call()["env"]
+    assert isinstance(env, dict)
+    assert env[variable] == str(tmp_path / "state")
+
+
+@pytest.mark.parametrize(
+    ("harness_type", "events"), [(ClaudeCode, CLAUDE_OK), (Codex, CODEX_OK)]
+)
+def test_model_flag(
+    tmp_path: Path,
+    workspace: Path,
+    harness_type: type[ClaudeCode | Codex],
+    events: list[dict[str, JsonValue]],
+) -> None:
+    cli = fake_cli(tmp_path, events)
+
+    harness_type(model="some-model", executable=str(cli.path)).run_turn(
+        make_turn(workspace), lambda _: None
+    )
+
+    argv = cli.argv()
+    assert argv[argv.index("--model") + 1] == "some-model"
+
+
+@pytest.mark.parametrize(
+    ("harness_type", "events"), [(ClaudeCode, CLAUDE_OK), (Codex, CODEX_OK[1:])]
+)
+def test_unresumable_session_raises(
+    tmp_path: Path,
+    workspace: Path,
+    harness_type: type[ClaudeCode | Codex],
+    events: list[dict[str, JsonValue]],
+) -> None:
+    cli = fake_cli(tmp_path, events, fail_resume=True)
+
+    with pytest.raises(RuntimeError, match="No conversation found"):
+        harness_type(executable=str(cli.path)).run_turn(
+            make_turn(workspace, session_id="gone"), lambda _: None
+        )
+
+
+def test_claude_structured_output(tmp_path: Path, workspace: Path) -> None:
+    events = claude_events(structured_output=ANSWER)
+    events[1] = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {"type": "text", "text": "Answering."},
+                {
+                    "type": "tool_use",
+                    "id": "t3",
+                    "name": "StructuredOutput",
+                    "input": {"approved": True},
+                },
+            ]
+        },
+    }
+    cli = fake_cli(tmp_path, events)
+    seen: list[str] = []
+
+    result = ClaudeCode(executable=str(cli.path)).run_turn(
+        make_turn(workspace, session_id="sess-1", schema=SCHEMA),
+        seen.append,
+    )
+
+    assert result.structured == ANSWER
+    assert seen == ["Answering."]
+    argv = cli.argv()
+    schema_arg = argv[argv.index("--json-schema") + 1]
+    assert isinstance(schema_arg, str)
+    assert json.loads(schema_arg) == SCHEMA
+    assert argv[-2:] == ["--resume", "sess-1"]
+
+
+def test_codex_structured_output(tmp_path: Path, workspace: Path) -> None:
+    cli = fake_cli(tmp_path, codex_events(json.dumps(ANSWER)))
+
+    result = Codex(executable=str(cli.path)).run_turn(
+        make_turn(workspace, session_id="thread-1", schema=SCHEMA),
+        lambda _: None,
+    )
+
+    assert result.structured == ANSWER
+    argv = cli.argv()
+    assert "--output-schema" in argv
+    assert argv.index("--output-schema") < argv.index("resume")
+    assert argv[-3:] == ["resume", "thread-1", "-"]
+    schema_path = argv[argv.index("--output-schema") + 1]
+    assert isinstance(schema_path, str)
+    assert not Path(schema_path).is_relative_to(workspace)
+    assert not Path(schema_path).exists()
+
+
+@dataclass
+class Inner:
+    name: str
+    count: int | None = None
+
+
+@dataclass
+class Outer:
+    inner: Inner
+    tags: list[Inner]
+    note: str = ""
+
+
+@pytest.mark.parametrize(
+    ("schema", "expected"),
+    [
+        (
+            TypeAdapter(Outer).json_schema(),
+            {
+                "$defs": {
+                    "Inner": {
+                        "properties": {
+                            "name": {"title": "Name", "type": "string"},
+                            "count": {
+                                "anyOf": [{"type": "integer"}, {"type": "null"}],
+                                "default": None,
+                                "title": "Count",
+                            },
+                        },
+                        "required": ["name", "count"],
+                        "additionalProperties": False,
+                        "title": "Inner",
+                        "type": "object",
+                    }
+                },
+                "properties": {
+                    "inner": {"$ref": "#/$defs/Inner"},
+                    "tags": {
+                        "items": {"$ref": "#/$defs/Inner"},
+                        "title": "Tags",
+                        "type": "array",
+                    },
+                    "note": {"default": "", "title": "Note", "type": "string"},
+                },
+                "required": ["inner", "tags", "note"],
+                "additionalProperties": False,
+                "title": "Outer",
+                "type": "object",
+            },
+        ),
+        (
+            {
+                "type": "array",
+                "items": {
+                    "anyOf": [
+                        {"type": "object", "properties": {"a": {"type": "string"}}},
+                        {"type": "null"},
+                    ]
+                },
+            },
+            {
+                "type": "array",
+                "items": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {"a": {"type": "string"}},
+                            "required": ["a"],
+                            "additionalProperties": False,
+                        },
+                        {"type": "null"},
+                    ]
+                },
+            },
+        ),
+    ],
+)
+def test_codex_schema_is_made_strict(
+    tmp_path: Path,
+    workspace: Path,
+    schema: dict[str, JsonValue],
+    expected: dict[str, JsonValue],
+) -> None:
+    original = json.loads(json.dumps(schema))
+    cli = fake_cli(tmp_path, codex_events("[]"))
+
+    Codex(executable=str(cli.path)).run_turn(
+        make_turn(workspace, schema=schema), lambda _: None
+    )
+
+    assert cli.call()["schema"] == expected
+    assert schema == original
+
+
+@pytest.mark.parametrize(
     ("harness_type", "events", "exit_code", "error"),
     [
-        (ClaudeCodeHarness, CLAUDE_OK, 1, "exited with status 1: fake stderr"),
+        (ClaudeCode, CLAUDE_OK, 1, "exited with status 1: fake stderr"),
         (
-            ClaudeCodeHarness,
+            ClaudeCode,
             [
                 {
                     "type": "result",
@@ -238,7 +500,7 @@ def test_codex_resumed_turn(tmp_path: Path, workspace: Path) -> None:
             "Failed to authenticate",
         ),
         (
-            ClaudeCodeHarness,
+            ClaudeCode,
             [
                 {
                     "type": "result",
@@ -250,10 +512,24 @@ def test_codex_resumed_turn(tmp_path: Path, workspace: Path) -> None:
             0,
             "error_max_turns",
         ),
-        (ClaudeCodeHarness, CLAUDE_OK[:-1], 0, "without a final message"),
-        (CodexHarness, CODEX_OK, 2, "exited with status 2: fake stderr"),
         (
-            CodexHarness,
+            ClaudeCode,
+            [
+                {
+                    "type": "result",
+                    "subtype": "error_max_structured_output_retries",
+                    "is_error": False,
+                    "session_id": "sess-1",
+                }
+            ],
+            0,
+            "error_max_structured_output_retries",
+        ),
+        (ClaudeCode, CLAUDE_OK[:-1], 0, "without a final message"),
+        (ClaudeCode, CLAUDE_OK, 0, "without a structured output"),
+        (Codex, CODEX_OK, 2, "exited with status 2: fake stderr"),
+        (
+            Codex,
             [
                 CODEX_OK[0],
                 {"type": "error", "message": "stream disconnected"},
@@ -263,23 +539,28 @@ def test_codex_resumed_turn(tmp_path: Path, workspace: Path) -> None:
             "model overloaded",
         ),
         (
-            CodexHarness,
+            Codex,
             [CODEX_OK[0], {"type": "error", "message": "stream disconnected"}],
             0,
             "never completed the turn: stream disconnected",
         ),
-        (CodexHarness, [CODEX_OK[0], CODEX_OK[-1]], 0, "without a final message"),
-        (CodexHarness, CODEX_OK[1:], 0, "without a thread id"),
+        (Codex, [CODEX_OK[0], CODEX_OK[-1]], 0, "without a final message"),
+        (Codex, CODEX_OK[1:], 0, "without a thread id"),
+        (Codex, CODEX_OK, 0, "final message is not JSON: 'All done.'"),
     ],
 )
 def test_failures_raise(
     tmp_path: Path,
-    harness_type: type[ClaudeCodeHarness | CodexHarness],
-    events: list[dict[str, object]],
+    harness_type: type[ClaudeCode | Codex],
+    events: list[dict[str, JsonValue]],
     exit_code: int,
     error: str,
 ) -> None:
     cli = fake_cli(tmp_path, events, exit_code)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
 
     with pytest.raises(RuntimeError, match=error):
-        harness_type(str(cli.path)).run_turn(tmp_path, "go", None, lambda _: None)
+        harness_type(executable=str(cli.path)).run_turn(
+            make_turn(workspace, schema=SCHEMA), lambda _: None
+        )

@@ -18,6 +18,7 @@ from fledge.settings import Settings
 from fledge.store import Store
 from fledge.web.app import create_app
 from fledge.workflows import (
+    SnapshotLoader,
     load_workflows,
     read_snapshot,
     start_triggers,
@@ -31,8 +32,8 @@ DATABASE_URL_ENV = "DATABASE_URL"
 
 async def _serve(config: Settings, database_url: str, host: str, port: int) -> None:
     snapshot = read_snapshot(config.workflows_dir)
-    workflows = load_workflows(snapshot.files)
-    bindings = start_triggers(snapshot.hash, workflows)
+    loaded = load_workflows(snapshot.files)
+    bindings = start_triggers(snapshot.hash, loaded.workflows)
     for name, binding in bindings.items():
         try:
             await binding.trigger.check()
@@ -40,17 +41,19 @@ async def _serve(config: Settings, database_url: str, host: str, port: int) -> N
             raise SystemExit(f"workflow {name!r}: {err}") from err
     logger.info(
         "loaded workflows %s from %s (snapshot %s)",
-        ", ".join(sorted(workflows)),
+        ", ".join(sorted(loaded.workflows)),
         config.workflows_dir,
         snapshot.hash[:12],
     )
     async with Store(database_url) as store:
         await store.save_snapshot(snapshot.hash, snapshot.files)
         app = create_app(store, bindings)
+        loader = SnapshotLoader(store)
         orchestrator = Orchestrator(
             store,
             DockerRunner(config.docker_network, source_dir=config.step_source_dir),
             config,
+            loader.workflow,
         )
         poller = Poller(store, bindings, config)
         server = uvicorn.Server(

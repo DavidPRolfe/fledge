@@ -1,4 +1,4 @@
-"""Running git in the run workspace, shared by the built-in steps."""
+"""Running git in the run workspace, for steps."""
 
 import base64
 import os

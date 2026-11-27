@@ -48,17 +48,11 @@ def internal_routes(store: Store) -> APIRouter:
             raise RuntimeError(f"step run {step_run.id} has no run")
         if run.snapshot_hash is None:
             raise RuntimeError(f"run {run.id} predates workflow snapshots")
-        earlier = [
-            s
-            for s in await store.list_step_runs(run.id)
-            if s.step_index < step_run.step_index
-        ]
         return StepRunContext(
             run_id=run.id,
-            workflow=run.workflow,
-            step_index=step_run.step_index,
             work=run.work,
-            outputs={s.name: s.output for s in earlier},
+            function=step_run.function,
+            args=step_run.args,
             workflow_files=await store.get_snapshot_files(run.snapshot_hash),
         )
 
@@ -84,12 +78,19 @@ def internal_routes(store: Store) -> APIRouter:
         step_run: Annotated[StepRun, Depends(authorized_step_run)], body: StepResult
     ) -> None:
         recorded = await store.finish_step_run(
-            step_run.id, body.status, body.output, body.error
+            step_run.id, body.status, body.result, body.error
         )
         if not recorded:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 "step run is no longer running; the result was not recorded",
             )
+        if body.status == "succeeded":
+            message = f"step {step_run.name} succeeded"
+        else:
+            message = f"step {step_run.name} failed: {body.error}"
+        await store.append_event(
+            step_run.run_id, "state", message, step_run_id=step_run.id
+        )
 
     return router

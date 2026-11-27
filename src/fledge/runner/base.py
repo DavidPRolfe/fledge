@@ -1,8 +1,10 @@
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 from uuid import UUID
+
+from fledge.core import Service
 
 STEP_COMMAND = ("fledge", "step-exec")
 
@@ -19,6 +21,7 @@ class StepSpec:
     run_id: UUID
     image: str
     env: Mapping[str, str]
+    services: Sequence[Service] = ()
 
 
 class Runner(Protocol):
@@ -28,12 +31,19 @@ class Runner(Protocol):
 
     async def create_workspace(self, run_id: UUID) -> None: ...
 
-    async def start_step(self, spec: StepSpec) -> None: ...
+    async def start_step(self, spec: StepSpec) -> None:
+        """Start the step's container, with the spec's services next to it.
+
+        The step reaches each service by its name. Waiting for a service's
+        ready_port is the step container's job, not the runner's.
+        """
+        ...
 
     async def step_state(self, step_run_id: UUID) -> ContainerState: ...
 
     async def stop_step(self, step_run_id: UUID) -> None:
-        """Stop and remove the step's container. A missing container is fine."""
+        """Stop and remove the step's container and its services. Missing
+        containers are fine."""
         ...
 
     async def delete_workspace(self, run_id: UUID) -> None: ...

@@ -1,11 +1,13 @@
 """Tests against a real Docker-compatible daemon at DOCKER_HOST."""
 
 import gc
+import io
 import time
 import uuid
 import warnings
 from collections.abc import Iterator
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 
 import anyio
@@ -13,11 +15,15 @@ import docker
 import pytest
 from docker.errors import DockerException, NotFound
 
+from fledge.core import Service
 from fledge.runner.base import ContainerState, StepSpec
 from fledge.runner.docker import (
     IMAGE_SOURCE_PATH,
+    STEP_RUN_LABEL,
     DockerRunner,
     container_name,
+    network_name,
+    service_container_name,
     volume_name,
 )
 from fledge.wire import WORKSPACE_PATH
@@ -81,6 +87,14 @@ def ids(client: docker.DockerClient) -> Iterator[Tracker]:
     for step_run_id in tracker.step_run_ids:
         with suppress(NotFound):
             client.containers.get(container_name(step_run_id)).remove(force=True)
+        labelled = client.containers.list(
+            all=True, filters={"label": f"{STEP_RUN_LABEL}={step_run_id}"}
+        )
+        for container in labelled:
+            with suppress(NotFound):
+                container.remove(force=True)
+        with suppress(NotFound):
+            client.networks.get(network_name(step_run_id)).remove()
     for run_id in tracker.run_ids:
         with suppress(NotFound):
             client.volumes.get(volume_name(run_id)).remove(force=True)
@@ -242,3 +256,155 @@ async def test_source_dir_is_mounted_read_only_over_the_image_source(
     await wait_for_state(runner, step_run_id, ContainerState.EXITED)
 
     assert exit_code(client, step_run_id) == 0
+
+
+SERVICE_PORT = 8080
+# Services have no command of their own, so the test service image runs the
+# script in its environment, the way SCRIPT_COMMAND does for steps.
+SERVICE_DOCKERFILE = f"""\
+FROM {IMAGE}
+CMD ["sh", "-c", "eval \\"$SERVICE_SCRIPT\\""]
+"""
+
+
+@pytest.fixture(scope="module")
+def service_image(client: docker.DockerClient) -> Iterator[str]:
+    tag = f"fledge-test-service:{uuid.uuid4().hex[:12]}"
+    client.images.build(fileobj=io.BytesIO(SERVICE_DOCKERFILE.encode()), tag=tag)
+    yield tag
+    client.images.remove(tag, force=True)
+
+
+def tcp_service(name: str, image: str, body: str) -> Service:
+    """A service sending `body` to every TCP connection on SERVICE_PORT."""
+    script = f"while true; do echo {body} | nc -l -p {SERVICE_PORT}; done"
+    return Service(name=name, image=image, env={"SERVICE_SCRIPT": script})
+
+
+def fetch_script(host: str, expected: str) -> str:
+    """Succeeds once `host` sends `expected`; retries because the runner does
+    not wait for services to be ready."""
+    return (
+        "for i in $(seq 20); do"
+        f' [ "$(nc -w 1 {host} {SERVICE_PORT} </dev/null)" = {expected} ]'
+        " && exit 0; sleep 0.2; done; exit 1"
+    )
+
+
+def step_labelled(client: docker.DockerClient, step_run_id: uuid.UUID) -> list[str]:
+    containers = client.containers.list(
+        all=True, filters={"label": f"{STEP_RUN_LABEL}={step_run_id}"}
+    )
+    return [container.name or "" for container in containers]
+
+
+@pytest.mark.anyio
+async def test_step_reaches_its_service_by_name(
+    runner: DockerRunner, client: docker.DockerClient, ids: Tracker, service_image: str
+) -> None:
+    run_id = ids.run_id()
+    await runner.create_workspace(run_id)
+    step_run_id = ids.step_run_id()
+    step = replace(
+        spec(run_id, step_run_id, fetch_script("web", "hello")),
+        services=[tcp_service("web", service_image, "hello")],
+    )
+
+    await runner.start_step(step)
+    await wait_for_state(runner, step_run_id, ContainerState.EXITED)
+
+    assert exit_code(client, step_run_id) == 0
+
+
+@pytest.mark.anyio
+async def test_service_name_beats_a_same_named_container_on_the_main_network(
+    runner: DockerRunner,
+    client: docker.DockerClient,
+    ids: Tracker,
+    service_image: str,
+    network: str,
+) -> None:
+    shared_name = f"fledge-test-svc-{uuid.uuid4().hex[:12]}"
+    decoy_service = tcp_service(shared_name, service_image, "decoy")
+    decoy = client.containers.run(
+        service_image,
+        name=shared_name,
+        environment=dict(decoy_service.env),
+        network=network,
+        detach=True,
+    )
+    try:
+        run_id = ids.run_id()
+        await runner.create_workspace(run_id)
+        # A step without services reaches the decoy by that name, so the step
+        # with a service of the same name would too unless its own one wins.
+        plain = ids.step_run_id()
+        await runner.start_step(spec(run_id, plain, fetch_script(shared_name, "decoy")))
+        await wait_for_state(runner, plain, ContainerState.EXITED)
+        with_service = ids.step_run_id()
+        await runner.start_step(
+            replace(
+                spec(run_id, with_service, fetch_script(shared_name, "mine")),
+                services=[tcp_service(shared_name, service_image, "mine")],
+            )
+        )
+        await wait_for_state(runner, with_service, ContainerState.EXITED)
+
+        assert [exit_code(client, s) for s in (plain, with_service)] == [0, 0]
+    finally:
+        decoy.remove(force=True)
+
+
+@pytest.mark.anyio
+async def test_stop_step_removes_the_step_its_services_and_its_network(
+    runner: DockerRunner, client: docker.DockerClient, ids: Tracker, service_image: str
+) -> None:
+    run_id = ids.run_id()
+    await runner.create_workspace(run_id)
+    step_run_id = ids.step_run_id()
+    step = replace(
+        spec(run_id, step_run_id, "sleep 300"),
+        services=[
+            tcp_service("first", service_image, "one"),
+            tcp_service("second", service_image, "two"),
+        ],
+    )
+    await runner.start_step(step)
+    await wait_for_state(runner, step_run_id, ContainerState.RUNNING)
+    assert len(step_labelled(client, step_run_id)) == 3
+
+    await runner.stop_step(step_run_id)
+
+    assert await runner.step_state(step_run_id) == ContainerState.MISSING
+    assert step_labelled(client, step_run_id) == []
+    with pytest.raises(NotFound):
+        client.networks.get(network_name(step_run_id))
+
+
+@pytest.mark.anyio
+async def test_stop_step_cleans_up_a_half_started_step_and_is_idempotent(
+    runner: DockerRunner, client: docker.DockerClient, ids: Tracker, service_image: str
+) -> None:
+    run_id = ids.run_id()
+    await runner.create_workspace(run_id)
+    step_run_id = ids.step_run_id()
+    step = replace(
+        spec(run_id, step_run_id, "true"),
+        services=[
+            tcp_service("good", service_image, "ok"),
+            Service(name="broken", image="not a valid image reference"),
+        ],
+    )
+
+    with pytest.raises(DockerException):
+        await runner.start_step(step)
+    assert step_labelled(client, step_run_id) == [
+        service_container_name(step_run_id, "good")
+    ]
+
+    await runner.stop_step(step_run_id)
+    await runner.stop_step(step_run_id)
+
+    assert step_labelled(client, step_run_id) == []
+    with pytest.raises(NotFound):
+        client.networks.get(network_name(step_run_id))

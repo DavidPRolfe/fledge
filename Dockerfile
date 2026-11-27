@@ -8,7 +8,7 @@ ARG CLAUDE_CODE_VERSION=2.1.331
 ARG CODEX_VERSION=0.172.0
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git nodejs npm \
+    && apt-get install -y --no-install-recommends ca-certificates gh git nodejs npm \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \

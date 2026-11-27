@@ -12,13 +12,14 @@ from psycopg import sql
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
-from pydantic import TypeAdapter
+from pydantic import JsonValue, TypeAdapter
 
 from fledge.core import WorkItem
 
 RunOrigin = Literal["poll", "manual"]
 RunStatus = Literal["pending", "running", "succeeded", "failed", "cancelled"]
 TerminalRunStatus = Literal["succeeded", "failed", "cancelled"]
+CallKind = Literal["step", "wait"]
 StepStatus = Literal["running", "succeeded", "failed", "cancelled"]
 TerminalStepStatus = Literal["succeeded", "failed", "cancelled"]
 EventKind = Literal["log", "agent", "state"]
@@ -30,7 +31,6 @@ class WorkflowRef:
     """What a new run records about the workflow it runs."""
 
     name: str
-    steps: tuple[str, ...]
     snapshot_hash: str
 
 
@@ -52,8 +52,6 @@ class Run:
     finished_at: datetime | None
     snapshot_hash: str | None
     """None only for runs created before workflows were snapshotted."""
-    steps: list[str] | None
-    """Step names, in order. None only for runs created before snapshots."""
 
     @property
     def work(self) -> WorkItem:
@@ -68,12 +66,19 @@ class Run:
 
 @dataclass(frozen=True)
 class StepRun:
+    """One call a workflow made: a row of the run's journal."""
+
     id: UUID
     run_id: UUID
     step_index: int
+    """The call's position among the calls of its run, from 0."""
+    kind: CallKind
     name: str
+    function: str
+    """`module:qualname` of the step or wait function."""
+    args: dict[str, JsonValue]
     status: StepStatus
-    output: dict[str, str]
+    result: JsonValue
     error: str | None
     token_hash: str
     started_at: datetime
@@ -170,14 +175,13 @@ class Store:
         ):
             await cur.execute(
                 sql.SQL(
-                    "INSERT INTO runs (external_id, origin, workflow, steps, "
+                    "INSERT INTO runs (external_id, origin, workflow, "
                     "snapshot_hash, title, body, url, repo_url) "
-                    "VALUES (%s, 'manual', %s, %s, %s, %s, %s, %s, %s) RETURNING {}"
+                    "VALUES (%s, 'manual', %s, %s, %s, %s, %s, %s) RETURNING {}"
                 ).format(_RUN),
                 (
                     work.external_id,
                     workflow.name,
-                    list(workflow.steps),
                     workflow.snapshot_hash,
                     work.title,
                     work.body,
@@ -210,9 +214,9 @@ class Store:
             )
             await cur.execute(
                 sql.SQL(
-                    "INSERT INTO runs (external_id, origin, workflow, steps, "
+                    "INSERT INTO runs (external_id, origin, workflow, "
                     "snapshot_hash, title, body, url, repo_url) "
-                    "SELECT %s, 'poll', %s, %s, %s, %s, %s, %s, %s "
+                    "SELECT %s, 'poll', %s, %s, %s, %s, %s, %s "
                     "WHERE NOT EXISTS ("
                     "SELECT 1 FROM runs WHERE workflow = %s AND external_id = %s) "
                     "RETURNING {}"
@@ -220,7 +224,6 @@ class Store:
                 (
                     work.external_id,
                     workflow.name,
-                    list(workflow.steps),
                     workflow.snapshot_hash,
                     work.title,
                     work.body,
@@ -302,8 +305,16 @@ class Store:
             )
             return cur.rowcount == 1
 
-    async def create_step_run(
-        self, run_id: UUID, step_index: int, name: str, token_hash: str
+    async def create_step_run(  # noqa: PLR0913 - one argument per column
+        self,
+        run_id: UUID,
+        step_index: int,
+        kind: CallKind,
+        name: str,
+        *,
+        function: str,
+        args: dict[str, JsonValue],
+        token_hash: str,
     ) -> StepRun:
         async with (
             self._pool.connection() as conn,
@@ -311,10 +322,11 @@ class Store:
         ):
             await cur.execute(
                 sql.SQL(
-                    "INSERT INTO step_runs (run_id, step_index, name, token_hash) "
-                    "VALUES (%s, %s, %s, %s) RETURNING {}"
+                    "INSERT INTO step_runs "
+                    "(run_id, step_index, kind, name, function, args, token_hash) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING {}"
                 ).format(_STEP_RUN),
-                (run_id, step_index, name, token_hash),
+                (run_id, step_index, kind, name, function, Jsonb(args), token_hash),
             )
             return _one(await cur.fetchone())
 
@@ -330,7 +342,7 @@ class Store:
             return await cur.fetchone()
 
     async def list_step_runs(self, run_id: UUID) -> list[StepRun]:
-        """In step order."""
+        """In call order."""
         async with (
             self._pool.connection() as conn,
             conn.cursor(row_factory=class_row(StepRun)) as cur,
@@ -347,7 +359,7 @@ class Store:
         self,
         step_run_id: UUID,
         status: TerminalStepStatus,
-        output: dict[str, str],
+        result: JsonValue = None,
         error: str | None = None,
     ) -> bool:
         """Record the step's outcome if it is still running.
@@ -357,11 +369,22 @@ class Store:
         """
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                "UPDATE step_runs SET status = %s, output = %s, error = %s, "
+                "UPDATE step_runs SET status = %s, result = %s, error = %s, "
                 "finished_at = now() WHERE id = %s AND status = 'running'",
-                (status, Jsonb(output), error, step_run_id),
+                (status, Jsonb(result), error, step_run_id),
             )
             return cur.rowcount == 1
+
+    async def count_running_steps(self) -> int:
+        """Running calls of kind step across all runs: the step containers in use."""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT count(*) FROM step_runs "
+                "WHERE kind = 'step' AND status = 'running'"
+            )
+            row = _one(await cur.fetchone())
+        count: int = row[0]
+        return count
 
     async def append_event(
         self,

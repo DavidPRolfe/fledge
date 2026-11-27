@@ -1,5 +1,6 @@
 """The server-rendered web view."""
 
+import json
 from datetime import datetime
 from pathlib import Path
 from uuid import UUID
@@ -7,6 +8,7 @@ from uuid import UUID
 import jinja2
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
+from pydantic import JsonValue
 
 from fledge.store import Store
 from fledge.web.schemas import RunOut, run_detail
@@ -16,6 +18,15 @@ _TEMPLATES = Path(__file__).parent / "templates"
 
 def _is_http_url(value: object) -> bool:
     return isinstance(value, str) and value.lower().startswith(("http://", "https://"))
+
+
+def _result_text(result: JsonValue) -> str:
+    """Matches renderSteps in run.html, which redraws the table as it changes."""
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return result
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
 
 def _format_time(value: datetime | None) -> str:
@@ -33,6 +44,7 @@ def page_routes(store: Store, workflow_names: list[str]) -> APIRouter:
     )
     env.tests["http_url"] = _is_http_url
     env.filters["time"] = _format_time
+    env.filters["result_text"] = _result_text
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> str:

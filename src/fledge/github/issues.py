@@ -53,7 +53,7 @@ class GitHubIssuesTrigger:
     falling back to unauthenticated requests, whose low rate limit and lack of
     private-repo access would surface later as confusing failures.
 
-    `transport` exists so tests can replace the network; the registry never
+    `transport` exists so tests can replace the network; workflow code never
     passes it.
     """
 
@@ -115,7 +115,7 @@ class GitHubIssuesTrigger:
     async def check(self) -> None:
         """Check GITHUB_TOKEN can read the repository and its issues and push.
 
-        Pushing is checked because the built-in OpenPullRequest step uses the
+        Pushing is checked because agents push and open pull requests with the
         same token; without it a run fails only after the agent has finished.
         Permission to open pull requests cannot be checked without opening one.
         """
@@ -150,7 +150,8 @@ class GitHubIssuesTrigger:
             raise TriggerCheckError(
                 f"GITHUB_TOKEN cannot {action} {self._repo} "
                 f"(HTTP {response.status_code}). It needs Contents read/write, "
-                "Issues read and Pull requests read/write on the repository."
+                "Issues read, Pull requests read/write and, to watch CI, Checks, "
+                "Commit statuses and Actions read on the repository."
             )
         response.raise_for_status()
 

@@ -4,9 +4,18 @@ from uuid import uuid4
 
 import anyio
 import pytest
+from pydantic import JsonValue
 
 from fledge.core import WorkItem
-from fledge.store import Run, Store, TerminalRunStatus, WorkflowRef, hash_token
+from fledge.store import (
+    CallKind,
+    Run,
+    StepRun,
+    Store,
+    TerminalRunStatus,
+    WorkflowRef,
+    hash_token,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -22,12 +31,8 @@ def work_item(external_id: str = "42") -> WorkItem:
 
 
 SNAPSHOT_FILES = {"ticket.py": "# workflow source", "prompts/implement.md": "Fix"}
-TICKET_TO_PR = WorkflowRef(
-    name="ticket_to_pr",
-    steps=("clone", "implement", "open_pull_request"),
-    snapshot_hash="snapshot-under-test",
-)
-OTHER = WorkflowRef(name="other", steps=("only",), snapshot_hash="snapshot-under-test")
+TICKET_TO_PR = WorkflowRef(name="ticket_to_pr", snapshot_hash="snapshot-under-test")
+OTHER = WorkflowRef(name="other", snapshot_hash="snapshot-under-test")
 
 
 @pytest.fixture
@@ -51,11 +56,10 @@ async def test_snapshot_is_stored_once_per_hash(store: Store) -> None:
         await store.get_snapshot_files("no-such-hash")
 
 
-async def test_run_records_its_workflow_steps_and_snapshot(store: Store) -> None:
+async def test_run_records_its_workflow_and_snapshot(store: Store) -> None:
     run = await make_run(store)
 
     assert run.workflow == "ticket_to_pr"
-    assert run.steps == ["clone", "implement", "open_pull_request"]
     assert run.snapshot_hash == TICKET_TO_PR.snapshot_hash
 
 
@@ -140,13 +144,33 @@ async def test_pending_run_can_be_finished(store: Store) -> None:
     assert not await store.mark_run_running(run.id)
 
 
-async def test_step_runs(store: Store) -> None:
+async def make_call(
+    store: Store, run: Run, index: int, kind: CallKind = "step"
+) -> StepRun:
+    return await store.create_step_run(
+        run.id,
+        index,
+        kind,
+        f"call{index}",
+        function=f"workflows.ticket:call{index}",
+        args={"n": index, "nested": {"items": [1, "two"]}},
+        token_hash=hash_token(f"token-{index}"),
+    )
+
+
+async def test_step_runs_form_the_journal(store: Store) -> None:
     run = await make_run(store)
-    second = await store.create_step_run(run.id, 1, "implement", hash_token("b"))
-    first = await store.create_step_run(run.id, 0, "clone", hash_token("a"))
-    assert first.status == "running"
-    assert first.output == {}
-    assert first.token_hash == hashlib.sha256(b"a").hexdigest()
+    second = await make_call(store, run, 1, "wait")
+    first = await make_call(store, run, 0)
+    assert (first.kind, first.name, first.function) == (
+        "step",
+        "call0",
+        "workflows.ticket:call0",
+    )
+    assert first.args == {"n": 0, "nested": {"items": [1, "two"]}}
+    assert (first.status, first.result, first.finished_at) == ("running", None, None)
+    assert first.token_hash == hashlib.sha256(b"token-0").hexdigest()
+    assert second.kind == "wait"
     assert await store.get_step_run(first.id) == first
     assert await store.get_step_run(uuid4()) is None
     assert [step.id for step in await store.list_step_runs(run.id)] == [
@@ -154,23 +178,59 @@ async def test_step_runs(store: Store) -> None:
         second.id,
     ]
 
-    assert await store.finish_step_run(first.id, "succeeded", {"branch": "fledge/42"})
-    assert await store.finish_step_run(second.id, "cancelled", {})
-    # A result reported after the step was cancelled must not replace the outcome.
-    assert not await store.finish_step_run(second.id, "succeeded", {"pr": "url"})
+    result: JsonValue = {"branch": "fledge/42", "files": ["a.py"], "ok": True}
+    assert await store.finish_step_run(first.id, "succeeded", result)
+    assert await store.finish_step_run(second.id, "cancelled")
+    # A result reported after the call was cancelled must not replace the outcome.
+    assert not await store.finish_step_run(second.id, "succeeded", "late")
 
     done, cancelled = await store.list_step_runs(run.id)
-    assert done.status == "succeeded"
-    assert done.output == {"branch": "fledge/42"}
+    assert (done.status, done.result, done.error) == ("succeeded", result, None)
     assert done.finished_at is not None
-    assert cancelled.status == "cancelled"
-    assert cancelled.output == {}
+    assert (cancelled.status, cancelled.result) == ("cancelled", None)
+
+
+@pytest.mark.parametrize("result", ["text", 3, [1, 2], None])
+async def test_step_result_may_be_any_json(store: Store, result: JsonValue) -> None:
+    run = await make_run(store)
+    call = await make_call(store, run, 0)
+
+    assert await store.finish_step_run(call.id, "succeeded", result)
+
+    finished = await store.get_step_run(call.id)
+    assert finished is not None
+    assert finished.result == result
+
+
+async def test_failed_step_records_its_error(store: Store) -> None:
+    run = await make_run(store)
+    call = await make_call(store, run, 0)
+
+    assert await store.finish_step_run(call.id, "failed", error="boom")
+
+    failed = await store.get_step_run(call.id)
+    assert failed is not None
+    assert (failed.status, failed.error) == ("failed", "boom")
+
+
+async def test_count_running_steps_spans_runs_and_skips_waits(store: Store) -> None:
+    run = await make_run(store, "1")
+    other = await make_run(store, "2")
+    assert await store.count_running_steps() == 0
+
+    step = await make_call(store, run, 0)
+    await make_call(store, other, 0)
+    await make_call(store, other, 1, "wait")
+    assert await store.count_running_steps() == 2
+
+    assert await store.finish_step_run(step.id, "succeeded")
+    assert await store.count_running_steps() == 1
 
 
 async def test_events_after_cursor(store: Store) -> None:
     run = await make_run(store)
     other = await make_run(store, "other")
-    step = await store.create_step_run(run.id, 0, "clone", hash_token("t"))
+    step = await make_call(store, run, 0)
 
     state = await store.append_event(run.id, "state", "run started")
     await store.append_event(other.id, "log", "unrelated")

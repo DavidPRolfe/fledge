@@ -1,7 +1,7 @@
 # Proposal: workflows as functions, agents and sandboxes
 
-Status: proposed. This covers the API a workflow author sees. Agent calls
-(section 3) and pull request handling (section 6) are the least settled parts.
+Status: implemented. The "Decisions from review" section at the end records
+what a review of this proposal against the codebase settled.
 
 ## Problem
 
@@ -30,8 +30,9 @@ have a service such as Postgres next to it.
 3. **Steps hand each other values**, as arguments and return values.
 4. **An agent is a value with identity.** It has a harness, a sandbox and a
    session that lasts the run. Any number of calls can prompt it.
-5. **A sandbox is rebuilt each time it is entered.** An agent's files and
-   session persist. Its container and services do not.
+5. **A sandbox is rebuilt each time it is entered.** The run's workspace
+   (its repositories and each agent's session) persists and is shared by
+   every agent and step of the run. Containers and services do not persist.
 6. **Work happens in containers; waiting and deciding happen in the control
    plane.** A run waiting on CI or a person holds no container.
 7. **Agents do the git work; the workflow says when.** Committing, merging in
@@ -137,6 +138,13 @@ def docs_only(ctx: StepContext, repo: Repo) -> bool:
   call returns its result.
 - Arguments and results must be serialisable: built-in types, dataclasses
   and Pydantic models.
+- Arguments are stored as JSON and rebuilt in the container from the
+  function's type hints, so every parameter and the return value need a
+  precise annotation.
+- A step is a module-level function. The container finds it by module and
+  name in the run's snapshot of the workflows directory.
+- A step that raises fails the call. In the workflow the call raises
+  `StepFailed`, which fails the run unless the workflow catches it.
 - `@step(sandbox=dev)` runs the step with a sandbox.
 
 ```python
@@ -144,10 +152,14 @@ def docs_only(ctx: StepContext, repo: Repo) -> bool:
 class Repo:
     url: str
     path: Path  # a directory inside the run's workspace
+    branch: str  # the run's working branch, created by clone_repo
+    base: str  # the repository's default branch
 ```
 
 `clone_repo(url) -> Repo` is built in. Each clone is its own directory, so
-one run can hold several repositories.
+one run can hold several repositories. It creates and checks out the branch
+`fledge/<run id>`, so the branch has a name before any agent commits and
+Fledge can find the pull request by it later (section 6).
 
 ### 3. Agent
 
@@ -176,6 +188,13 @@ There is one way to give an agent work: `prompt`.
   workflow gets a decision out of an agent without parsing prose.
 - The first prompt an agent receives in a run starts its session. Every
   later one resumes it. A session that cannot be resumed fails the call.
+- An agent is a module-level value and its name is unique among the agents
+  in the workflows directory. The call records the agent's name, and the
+  container looks the agent up by that name in the run's snapshot, so a
+  custom harness never has to be serialised. A `returns=` type is a
+  module-level class for the same reason.
+- Session state lives in the run's workspace, in a directory per agent
+  outside any repository, so it survives from one container to the next.
 
 `approves` is the one piece of sugar: a check (section 5) that prompts the
 agent with `returns=Review` and maps `approved` to passed and the comments to
@@ -184,9 +203,11 @@ feedback.
 **Harness.** A harness is a value, `ClaudeCode(model=...)`, so it can carry
 options. A custom harness is a class in the workflows directory. What Fledge
 asks of a harness is one operation: run a turn given a prompt, a working
-directory, extra environment variables, a directory for session state, and
-optionally an output schema. Everything in this proposal, including pull
-request handling, is built from that.
+directory, a directory for session state, the session to resume if there is
+one, and optionally an output schema. Environment variables come from the
+container, which already has the sandbox's and the configured secrets.
+Everything in this proposal, including pull request handling, is built from
+that.
 
 ### 4. Sandbox and Service
 
@@ -209,9 +230,13 @@ class Sandbox:
   step or check declared with it.
 - A service starts with the container and is removed with it. Nothing in a
   service survives from one call to the next.
-- A service is reachable on `localhost` and by its `name`.
+- A service is reachable by its `name`. It is not on `localhost`: that
+  would need every container of the call to share one network namespace,
+  where two services on the same port clash.
 - `ready_port`: the call does not start until a TCP connection to that port
   succeeds, and fails if it does not within a fixed time.
+- The image is still the one Fledge is configured with. A per-sandbox image
+  is the natural next field and is left out for now.
 
 ### 5. Checks and `until`
 
@@ -226,6 +251,8 @@ def until(check: Check, *, max_rounds: int) -> Iterator[Feedback]: ...
   evaluated again. After `max_rounds` rounds it raises `RoundsExhausted`,
   which fails the run unless the workflow catches it.
 - **Stopped:** it raises `RunStopped`, which ends the run as `cancelled`.
+  `RunStopped` is a `BaseException`, so the `except Exception` that section
+  7 allows cannot swallow it.
 
 A check is a value describing something to evaluate. There are two kinds:
 
@@ -236,14 +263,17 @@ def tests_pass(ctx: StepContext, repo: Repo) -> Passed | Feedback:
 
 
 @wait
-def release_approved(ticket: str, since: datetime) -> Verdict:
+def release_approved(ctx: WaitContext, ticket: str) -> Verdict:
     ...
 ```
 
 - `@check` runs in a container, like a step.
 - `@wait` is polled by the control plane with no container. It may also
-  return `Pending` or `Stopped`. `since` is when this loop last received
-  feedback, or when it started.
+  return `Pending` or `Stopped`. `ctx.since` is when this loop last received
+  feedback, or when it started. It arrives on a context argument, as a
+  step's does, so that the call `release_approved(ticket)` type-checks.
+- A run that is waiting does not count against the limit on concurrent
+  work. The limit is on step containers, not on runs.
 
 ```python
 @dataclass(frozen=True)
@@ -269,9 +299,12 @@ Built-in checks:
   their log tails.
 - `merged(pr)`: waits for the pull request. Passed when merged, stopped when
   closed unmerged, feedback for new reviews, comments and failing checks.
+  Comments by bots and by the account Fledge's token belongs to are
+  ignored, or the agent would answer itself.
 
-Guidance typed into the web page is feedback too: it is delivered to the
-running agent turn, or as the next round of the gate the run is waiting in.
+Guidance typed into the web page is feedback too: it is delivered when the
+running agent turn ends, as one more turn in the same container, or as the
+next round of the wait the run is in.
 
 ### 6. Pull requests
 
@@ -287,17 +320,21 @@ def mark_ready(pr: PullRequest) -> None: ...
 ```
 
 - Fledge is configured with one GitHub token. Every agent turn has it in its
-  environment, so an agent can fetch, push and use `gh` at any time.
+  environment, so an agent can fetch, push and use `gh` at any time. The
+  image ships `gh`, and each agent turn sets it up as git's credential
+  helper inside the container, so the token is never written to the
+  workspace.
 - `open_pull_request` and `push` are agent prompts with a check afterwards.
   When the turn ends Fledge verifies the result against GitHub: the branch
   head on the remote equals the local head, and a pull request exists for
   the branch. If not, the call fails.
-- Fledge names the branch, so it finds the pull request itself and does not
-  rely on the agent's report.
+- Fledge names the branch when the repository is cloned (`Repo.branch`), so
+  it finds the pull request itself and does not rely on the agent's report.
 - The built-in prompt for `push` tells the agent to fetch the branch and
   merge in anything new before pushing.
 - `mark_ready`, `checks_green` and `merged` need no judgement, so Fledge
-  calls GitHub directly with the same token.
+  calls GitHub directly with the same token: `mark_ready` as a step,
+  the other two as waits.
 
 Nothing here hooks into a harness, and nothing stops an agent pushing
 earlier than the workflow asks. The workflow's calls are where publishing is
@@ -309,7 +346,19 @@ the token's scope and the repository's branch protection.
 Fledge records the result of every step, check and wait. To advance a run it
 calls the workflow function from the top; calls that already have a result
 return it at once, and the first call without one starts its work and
-suspends the function by raising through it. Two rules for authors follow:
+suspends the function by raising through it.
+
+A call is identified by its position in the run: the first call the body
+makes is call 0, the next call 1, and so on. Names cannot identify calls,
+because a loop makes the same call many times. The function behind each call
+is recorded too, and a replay that reaches a different function at some
+position fails the run instead of returning the wrong result.
+
+A run keeps the workflow code it started with. After a restart with edited
+workflows, the control plane loads the stored snapshot of each run still in
+flight and replays that, alongside the new code for new runs.
+
+Two rules for authors follow:
 
 - **The body must be deterministic.** No I/O, clock or randomness outside
   steps, because the body is run many times and must decide the same way
@@ -317,22 +366,20 @@ suspends the function by raising through it. Two rules for authors follow:
 - **Do not catch `BaseException` or use a bare `except:`.** That would
   swallow the suspension. `except Exception` is fine.
 
-**Sync now, possibly async.** Workflows are plain functions because this
-model does not need coroutines and the code reads better without `await` on
-every line. Reasons we might move to `async def` workflows: an engine that
-holds a thread per in-flight synchronous workflow, the cost of re-running
-long workflows from the top, `finally` and `with` exits running on every
-suspension, and parallel work, which composes more naturally from
-coroutines. Switching is mechanical but touches every workflow, so this
-should be decided before the API ships.
+**Sync.** Workflows are plain functions because this model does not need
+coroutines and the code reads better without `await` on every line. With
+Fledge's own replay engine a suspended run holds nothing: no thread, no
+coroutine. What remains of the case for `async def` is the cost of
+re-running long workflows from the top, `finally` and `with` exits running
+on every suspension, and parallel work, which composes more naturally from
+coroutines. Parallel work (section 8) is the one that could reopen this.
 
 ### 8. Parallel work
 
 We expect to need it: several agents at once, and one run opening pull
 requests in several repositories. Workflows as functions that pass values
 were chosen partly so this can be added as a helper and not as a new kind of
-workflow. Its API is not part of this proposal, and it is the main input to
-the sync or async decision.
+workflow. Its API is not part of this proposal.
 
 ### 9. What goes away
 
@@ -342,6 +389,36 @@ the sync or async decision.
   template fields.
 - The `fledge.harnesses` entry point group.
 - The `open_pull_request` step that pushes with Fledge's own token.
+- `FLEDGE_MAX_CONCURRENT_RUNS`, replaced by `FLEDGE_MAX_CONCURRENT_STEPS`
+  (section 5).
+
+## Decisions from review
+
+1. **Fledge's own replay engine, no durable-execution library.** DBOS is
+   the closest fit (Postgres only), but releasing an idle workflow and
+   replaying it on wake is a paid feature there, it recovers only runs
+   whose code version matches the running one, which collides with per-run
+   snapshots, and it brings SQLAlchemy, pickled results and a process-wide
+   singleton. Temporal, Restate, Hatchet and Inngest each need another
+   server. Containers, results over HTTP and reconciliation after a restart
+   already exist here; the replay loop on top is small.
+2. **Harnesses keep driving the CLIs directly.** The Claude Agent SDK and
+   the Codex Python SDK both exist, but each bundles its own CLI binary,
+   which competes with the versions pinned in the Dockerfile.
+3. **Structured results use the CLIs' schema flags** (open question 3):
+   `--json-schema` for Claude Code, with the value in `structured_output`
+   on the result event, and `--output-schema` for Codex, where the final
+   message is the JSON. Combining Codex's flag with `resume` is not
+   documented and has to be confirmed on the pinned version.
+4. **Sessions resume across containers from the workspace volume**:
+   `CLAUDE_CONFIG_DIR` and `CODEX_HOME` point into the agent's session
+   directory. Documented for Claude Code; for Codex it follows from the
+   documentation but has not been confirmed in a fresh container.
+5. **Sync workflows** (open question 4, section 7).
+6. **Services are plain docker-py**: a network per call, services on it,
+   and the step container given each service's address under its name.
+   testcontainers removes containers when its own process dies, which is
+   the opposite of finding them again by name after a restart.
 
 ## Open questions
 
@@ -351,7 +428,3 @@ the sync or async decision.
 2. **Push as its own call.** The alternative is that once a pull request is
    open, every prompt in that repository may push and is verified. Shorter
    loops, less visible.
-3. **Structured results.** `returns=` assumes each harness can be held to an
-   output schema. To confirm for both CLIs; the fallback is parsing a
-   final-line verdict.
-4. **Sync or async workflows** (section 7).

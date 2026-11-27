@@ -2,19 +2,23 @@
 
 import logging
 import os
+import socket
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
 import httpx
+from pydantic import JsonValue
 
-from fledge import registry
-from fledge.core import Harness, Workflow, WorkItem
+from fledge import engine
+from fledge.agents import Agent
+from fledge.core import WorkItem
 from fledge.wire import (
     API_URL_ENV,
+    READY_PORTS_ENV,
     STEP_RUN_ID_ENV,
     STEP_TOKEN_ENV,
     WORKSPACE_PATH,
@@ -33,11 +37,22 @@ logger = logging.getLogger(__name__)
 RETRY_WINDOW_SECONDS = 120.0
 RETRY_INTERVAL_SECONDS = 2.0
 
+# Services start next to the step's container; a database image can take tens
+# of seconds before it accepts connections.
+READY_TIMEOUT_SECONDS = 60.0
+READY_INTERVAL_SECONDS = 0.5
+
 
 @dataclass(frozen=True)
 class RetryPolicy:
     window: float = RETRY_WINDOW_SECONDS
     interval: float = RETRY_INTERVAL_SECONDS
+
+
+@dataclass(frozen=True)
+class ReadyPolicy:
+    timeout: float = READY_TIMEOUT_SECONDS
+    interval: float = READY_INTERVAL_SECONDS
 
 
 class ControlPlane:
@@ -99,8 +114,8 @@ class ExecutorContext:
     run_id: UUID
     work: WorkItem
     workspace: Path
-    outputs: Mapping[str, Mapping[str, str]]
     control_plane: ControlPlane
+    agents: Mapping[str, Agent]
 
     def log(self, message: str) -> None:
         self.control_plane.post_event("log", message)
@@ -111,36 +126,71 @@ class ExecutorContext:
     def claim_guidance(self) -> list[str]:
         return self.control_plane.claim_guidance()
 
-    def harness(self, name: str) -> Harness:
-        return registry.load_harness(name)
+    def agent(self, name: str) -> Agent:
+        if name not in self.agents:
+            raise LookupError(f"the run's workflow code defines no agent {name!r}")
+        return self.agents[name]
 
 
-def execute(
+def wait_for_services(addresses: Sequence[str], policy: ReadyPolicy) -> None:
+    """Wait until each `host:port` accepts a TCP connection, all within one timeout."""
+    deadline = time.monotonic() + policy.timeout
+    for address in addresses:
+        host, _, port = address.rpartition(":")
+        while True:
+            try:
+                with socket.create_connection((host, int(port)), policy.interval):
+                    break
+            except OSError as err:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"service {address} did not accept a connection within "
+                        f"{policy.timeout:g} seconds"
+                    ) from err
+            time.sleep(policy.interval)
+
+
+def _run_step(
+    run: StepRunContext,
     control_plane: ControlPlane,
-    load: Callable[[Mapping[str, str]], Mapping[str, Workflow]] = load_workflows,
-    workspace: Path = Path(WORKSPACE_PATH),
-) -> int:
-    """Run the step and report its result. Returns the process exit code."""
-    run = control_plane.context()
+    workspace: Path,
+    ready: ReadyPolicy,
+) -> JsonValue:
+    # Loading the snapshot is what makes its package importable, so it has to
+    # happen before the step's function is resolved.
+    loaded = load_workflows(run.workflow_files)
+    step = engine.resolve_step(run.function)
     ctx = ExecutorContext(
         run_id=run.run_id,
         work=run.work,
         workspace=workspace,
-        outputs=run.outputs,
         control_plane=control_plane,
+        agents=loaded.agents,
     )
+    ready_ports = os.environ.get(READY_PORTS_ENV)
+    if ready_ports:
+        wait_for_services(ready_ports.split(","), ready)
+    return step.execute(ctx, run.args)
+
+
+def execute(
+    control_plane: ControlPlane,
+    workspace: Path = Path(WORKSPACE_PATH),
+    ready: ReadyPolicy = ReadyPolicy(),
+) -> int:
+    """Run the step and report its result. Returns the process exit code."""
+    run = control_plane.context()
     # Anything the step raises must reach the control plane as a failed result;
     # a container that just exits leaves the run waiting until the step timeout.
     try:
-        step = load(run.workflow_files)[run.workflow].steps[run.step_index]
-        output = step.run(ctx)
+        result = _run_step(run, control_plane, workspace, ready)
     except Exception as err:
         logger.exception("step failed")
         control_plane.report(
             StepResult(status="failed", error=f"{type(err).__name__}: {err}")
         )
         return 1
-    control_plane.report(StepResult(status="succeeded", output=output))
+    control_plane.report(StepResult(status="succeeded", result=result))
     return 0
 
 

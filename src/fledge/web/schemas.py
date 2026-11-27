@@ -5,9 +5,10 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, JsonValue, StringConstraints
 
 from fledge.store import (
+    CallKind,
     EventKind,
     Guidance,
     GuidanceSource,
@@ -43,9 +44,10 @@ class StepRunOut(BaseModel):
 
     id: UUID
     step_index: int
+    kind: CallKind
     name: str
     status: StepStatus
-    output: dict[str, str]
+    result: JsonValue
     error: str | None
     started_at: datetime
     finished_at: datetime | None

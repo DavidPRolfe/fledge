@@ -18,10 +18,6 @@ dependencies = [
 [project.scripts]
 fledge = "fledge.cli:main"
 
-[project.entry-points."fledge.harnesses"]
-claude_code = "fledge.builtin.harnesses.claude_code:ClaudeCodeHarness"
-codex = "fledge.builtin.harnesses.codex:CodexHarness"
-
 [build-system]
 requires = ["uv_build>=0.11.3,<0.12.0"]
 build-backend = "uv_build"

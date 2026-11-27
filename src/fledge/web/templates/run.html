@@ -18,21 +18,16 @@
   <span id="cancel-message" class="error"></span>
 </p>
 
-<h2>Steps</h2>
+<h2>Calls</h2>
 <table>
-  <thead><tr><th>Step</th><th>Status</th><th>Outputs</th><th>Error</th></tr></thead>
+  <thead><tr><th>Call</th><th>Kind</th><th>Status</th><th>Result</th><th>Error</th></tr></thead>
   <tbody id="steps">
   {% for step in steps %}
     <tr>
       <td>{{ step.name }}</td>
+      <td>{{ step.kind }}</td>
       <td class="status">{{ step.status }}</td>
-      <td>
-        <ul class="outputs">
-        {% for key, value in step.output.items() %}
-          <li>{{ key }}: {% if value is http_url %}<a href="{{ value }}">{{ value }}</a>{% else %}{{ value }}{% endif %}</li>
-        {% endfor %}
-        </ul>
-      </td>
+      <td>{% if step.result is http_url %}<a href="{{ step.result }}">{{ step.result }}</a>{% else %}{{ step.result | result_text }}{% endif %}</td>
       <td class="error">{{ step.error or "" }}</td>
     </tr>
   {% endfor %}
@@ -72,29 +67,28 @@
     return td;
   }
 
+  function resultText(result) {
+    if (result === null) return "";
+    if (typeof result === "string") return result;
+    return JSON.stringify(result);
+  }
+
   function renderSteps(steps) {
     const tbody = document.getElementById("steps");
     tbody.replaceChildren();
     for (const step of steps) {
       const row = tbody.insertRow();
       cell(row, step.name);
+      cell(row, step.kind);
       cell(row, step.status, "status");
-      const list = document.createElement("ul");
-      list.className = "outputs";
-      for (const [key, value] of Object.entries(step.output)) {
-        const item = document.createElement("li");
-        item.append(key + ": ");
-        if (isHttpUrl(value)) {
-          const link = document.createElement("a");
-          link.href = value;
-          link.textContent = value;
-          item.append(link);
-        } else {
-          item.append(value);
-        }
-        list.append(item);
+      if (typeof step.result === "string" && isHttpUrl(step.result)) {
+        const link = document.createElement("a");
+        link.href = step.result;
+        link.textContent = step.result;
+        cell(row, "").append(link);
+      } else {
+        cell(row, resultText(step.result));
       }
-      cell(row, "").append(list);
       cell(row, step.error || "", "error");
     }
   }

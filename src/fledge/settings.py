@@ -17,7 +17,9 @@ class Settings(BaseSettings):
     api_url: str = "http://fledge:8000"
     """Where step containers reach the control plane."""
     docker_network: str = "fledge"
-    max_concurrent_runs: int = 1
+    max_concurrent_steps: int = 1
+    """How many step containers may run at once. A run waiting on CI or a
+    person holds none, so any number of runs may be in progress."""
     poll_interval_seconds: int = 30
     step_timeout_minutes: int = 60
     step_secrets: Annotated[list[str], NoDecode] = [

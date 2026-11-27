@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from pydantic import JsonValue
 
 from fledge.core import Comment, WorkItem
 from fledge.store import Run, StepRun, Store, WorkflowRef, hash_token
@@ -14,9 +15,7 @@ pytestmark = pytest.mark.anyio
 
 UNTRUSTED_TITLE = "<script>alert(1)</script>"
 SNAPSHOT_FILES = {"ticket_to_pr.py": "# workflow source"}
-TICKET_TO_PR = WorkflowRef(
-    "ticket_to_pr", ("clone", "implement", "open_pull_request"), "snapshot-under-test"
-)
+TICKET_TO_PR = WorkflowRef("ticket_to_pr", "snapshot-under-test")
 
 
 def work_item(external_id: str, title: str = "Fix the thing") -> WorkItem:
@@ -71,10 +70,22 @@ async def make_run(store: Store, title: str = "Fix the thing") -> Run:
 
 
 async def make_step(
-    store: Store, run: Run, index: int = 0, name: str = "clone"
+    store: Store,
+    run: Run,
+    index: int = 0,
+    name: str = "clone_repo",
+    args: dict[str, JsonValue] | None = None,
 ) -> tuple[StepRun, str]:
     token = f"token-{uuid4()}"
-    step = await store.create_step_run(run.id, index, name, hash_token(token))
+    step = await store.create_step_run(
+        run.id,
+        index,
+        kind="step",
+        name=name,
+        function=f"fledge.steps:{name}",
+        args={} if args is None else args,
+        token_hash=hash_token(token),
+    )
     return step, token
 
 
@@ -138,9 +149,10 @@ async def test_get_run_includes_steps_and_guidance(
     body = response.json()
     assert body["run"]["id"] == str(run.id)
     [step_out] = body["steps"]
-    assert step_out["name"] == "clone"
+    assert step_out["name"] == "clone_repo"
+    assert step_out["kind"] == "step"
     assert step_out["status"] == "succeeded"
-    assert step_out["output"] == {"branch": "fledge/1"}
+    assert step_out["result"] == {"branch": "fledge/1"}
     assert "token_hash" not in step_out
     assert [(g["body"], g["delivered"]) for g in body["guidance"]] == [
         ("first", True),
@@ -264,13 +276,15 @@ async def test_internal_unknown_step_run_is_404(client: httpx.AsyncClient) -> No
     assert response.status_code == 404
 
 
-async def test_internal_context_has_earlier_outputs(
+async def test_internal_context_has_the_calls_function_and_arguments(
     client: httpx.AsyncClient, store: Store
 ) -> None:
     run = await make_run(store)
-    clone, _ = await make_step(store, run, 0, "clone")
+    clone, _ = await make_step(store, run, 0, "clone_repo")
     await store.finish_step_run(clone.id, "succeeded", {"branch": "fledge/1"})
-    implement, token = await make_step(store, run, 1, "implement")
+    implement, token = await make_step(
+        store, run, 1, "run_turn", {"agent": "implementer", "prompt": "Fix it"}
+    )
 
     response = await client.get(
         f"/internal/step-runs/{implement.id}", headers=bearer(token)
@@ -278,8 +292,6 @@ async def test_internal_context_has_earlier_outputs(
     assert response.status_code == 200
     assert response.json() == {
         "run_id": str(run.id),
-        "workflow": "ticket_to_pr",
-        "step_index": 1,
         "work": {
             "external_id": "1",
             "title": "Fix the thing",
@@ -287,7 +299,8 @@ async def test_internal_context_has_earlier_outputs(
             "url": "https://example.test/issues/1",
             "repo_url": "https://example.test/repo.git",
         },
-        "outputs": {"clone": {"branch": "fledge/1"}},
+        "function": "fledge.steps:run_turn",
+        "args": {"agent": "implementer", "prompt": "Fix it"},
         "workflow_files": SNAPSHOT_FILES,
     }
 
@@ -332,34 +345,51 @@ async def test_internal_guidance_is_claimed_once(
     assert response.json() == {"bodies": []}
 
 
-async def test_internal_result_is_recorded_once(
-    client: httpx.AsyncClient, store: Store
+@pytest.mark.parametrize(
+    ("result", "event"),
+    [
+        (
+            {"status": "succeeded", "result": {"branch": "fledge/1"}},
+            "step clone_repo succeeded",
+        ),
+        (
+            {"status": "failed", "error": "RuntimeError: clone failed"},
+            "step clone_repo failed: RuntimeError: clone failed",
+        ),
+    ],
+    ids=["succeeded", "failed"],
+)
+async def test_internal_result_is_recorded_once_with_a_state_event(
+    client: httpx.AsyncClient,
+    store: Store,
+    result: dict[str, JsonValue],
+    event: str,
 ) -> None:
     run = await make_run(store)
     step, token = await make_step(store, run)
     url = f"/internal/step-runs/{step.id}/result"
 
-    response = await client.post(
-        url,
-        json={"status": "failed", "output": {"log": "x"}, "error": "tests failed"},
-        headers=bearer(token),
-    )
+    response = await client.post(url, json=result, headers=bearer(token))
     assert response.status_code == 204
     finished = await store.get_step_run(step.id)
     assert finished is not None
-    assert (finished.status, finished.output, finished.error) == (
-        "failed",
-        {"log": "x"},
-        "tests failed",
+    assert (finished.status, finished.result, finished.error) == (
+        result["status"],
+        result.get("result"),
+        result.get("error"),
     )
+    events = await store.list_events(run.id)
+    assert [(e.kind, e.message, e.step_run_id) for e in events] == [
+        ("state", event, step.id)
+    ]
 
     response = await client.post(
-        url, json={"status": "succeeded"}, headers=bearer(token)
+        url, json={"status": "succeeded", "result": "late"}, headers=bearer(token)
     )
     assert response.status_code == 409
     unchanged = await store.get_step_run(step.id)
-    assert unchanged is not None
-    assert unchanged.status == "failed"
+    assert unchanged == finished
+    assert len(await store.list_events(run.id)) == 1
 
 
 async def test_index_page_lists_runs_escaped(
@@ -375,16 +405,20 @@ async def test_index_page_lists_runs_escaped(
     assert '<option value="ticket_to_pr">ticket_to_pr</option>' in html
 
 
-async def test_run_page_renders_steps_and_guidance(
+async def test_run_page_renders_calls_and_guidance(
     client: httpx.AsyncClient, store: Store
 ) -> None:
     run = await make_run(store, UNTRUSTED_TITLE)
-    step, _ = await make_step(store, run)
-    await store.finish_step_run(
-        step.id,
-        "succeeded",
-        {"pull_request": "https://example.test/pull/3", "note": "javascript:x"},
-    )
+    results: list[JsonValue] = [
+        "https://example.test/pull/3",
+        "javascript:x",
+        {"branch": "<b>main</b>"},
+        [1, "two"],
+        None,
+    ]
+    for index, result in enumerate(results):
+        step, _ = await make_step(store, run, index, f"call_{index}")
+        await store.finish_step_run(step.id, "succeeded", result)
     await store.add_guidance(run.id, "web", "web", "<b>bold</b>")
 
     response = await client.get(f"/runs/{run.id}")
@@ -392,9 +426,18 @@ async def test_run_page_renders_steps_and_guidance(
     html = response.text
     assert UNTRUSTED_TITLE not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<h2>Calls</h2>" in html
+    assert (
+        "<th>Call</th><th>Kind</th><th>Status</th><th>Result</th><th>Error</th>" in html
+    )
     assert '<a href="https://example.test/issues/1">' in html
     assert '<a href="https://example.test/pull/3">' in html
     assert 'href="javascript:x"' not in html
+    assert "<td>javascript:x</td>" in html
+    assert "<td>{&#34;branch&#34;:&#34;&lt;b&gt;main&lt;/b&gt;&#34;}</td>" in html
+    assert "<td>[1,&#34;two&#34;]</td>" in html
+    assert "<td>None</td>" not in html
+    assert "<td>step</td>" in html
     assert "&lt;b&gt;bold&lt;/b&gt;" in html
     assert "not delivered" in html
     assert 'id="cancel" type="button">' in html

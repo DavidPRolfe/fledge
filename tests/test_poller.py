@@ -57,7 +57,7 @@ SNAPSHOT_HASH = "snapshot-under-test"
 
 
 def bind(name: str, trigger: FakeTrigger) -> dict[str, TriggerBinding]:
-    return {name: TriggerBinding(trigger, WorkflowRef(name, ("only",), SNAPSHOT_HASH))}
+    return {name: TriggerBinding(trigger, WorkflowRef(name, SNAPSHOT_HASH))}
 
 
 @pytest.fixture
@@ -76,8 +76,8 @@ async def test_items_become_runs_once(store: Store) -> None:
 
     runs = await store.list_runs()
     assert sorted(run.external_id for run in runs) == ["1", "2"]
-    assert {(run.workflow, tuple(run.steps or ()), run.origin) for run in runs} == {
-        ("ticket_to_pr", ("only",), "poll")
+    assert {(run.workflow, run.snapshot_hash, run.origin) for run in runs} == {
+        ("ticket_to_pr", SNAPSHOT_HASH, "poll")
     }
 
 

@@ -10,7 +10,7 @@ Routes, all under the bearer token in STEP_TOKEN_ENV:
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 from fledge.core import WorkItem
 
@@ -18,15 +18,19 @@ API_URL_ENV = "FLEDGE_API_URL"
 STEP_RUN_ID_ENV = "FLEDGE_STEP_RUN_ID"
 STEP_TOKEN_ENV = "FLEDGE_STEP_TOKEN"  # noqa: S105 - name of an env var, not a secret
 
+# Comma-separated host:port pairs the executor must be able to connect to
+# before it runs the step: the ready ports of the sandbox's services.
+READY_PORTS_ENV = "FLEDGE_READY_PORTS"
+
 WORKSPACE_PATH = "/workspace"
 
 
 class StepRunContext(BaseModel):
     run_id: UUID
-    workflow: str
-    step_index: int
     work: WorkItem
-    outputs: dict[str, dict[str, str]]
+    function: str
+    """`module:qualname` of the step to run."""
+    args: dict[str, JsonValue]
     workflow_files: dict[str, str]
     """The run's workflow snapshot: source text by relative path."""
 
@@ -46,5 +50,5 @@ class GuidanceClaim(BaseModel):
 
 class StepResult(BaseModel):
     status: Literal["succeeded", "failed"]
-    output: dict[str, str] = {}
+    result: JsonValue = None
     error: str | None = None

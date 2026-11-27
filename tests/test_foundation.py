@@ -3,27 +3,8 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from fledge.core import Trigger, Workflow
 from fledge.db import migrate
 from fledge.settings import Settings
-
-
-class _NoTrigger:
-    def start(self) -> Trigger:
-        raise AssertionError("not started in this test")
-
-
-class _Step:
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def run(self, ctx: object) -> dict[str, str]:
-        return {}
-
-
-def test_workflow_rejects_duplicate_step_names() -> None:
-    with pytest.raises(ValueError, match="duplicate step names"):
-        Workflow(name="w", trigger=_NoTrigger(), steps=[_Step("a"), _Step("a")])
 
 
 def test_settings_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -32,7 +13,7 @@ def test_settings_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None
 
     settings = Settings()
 
-    assert settings.max_concurrent_runs == 1
+    assert settings.max_concurrent_steps == 1
     assert settings.step_secrets == ["GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]
     assert settings.workflows_dir == Path("/etc/fledge/workflows")
 
@@ -50,4 +31,4 @@ def test_migrate_creates_schema_and_is_repeatable(database_url: str) -> None:
         versions = conn.execute("SELECT count(*) FROM schema_migrations").fetchone()
 
     assert {"runs", "step_runs", "events", "guidance", "workflow_snapshots"} <= tables
-    assert versions == (2,)
+    assert versions == (3,)

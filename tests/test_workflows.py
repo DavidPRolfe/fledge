@@ -1,24 +1,39 @@
+import sys
 from pathlib import Path
 
 import pytest
 
-from fledge.builtin.triggers.github_issues import GitHubIssues, MissingTokenError
-from fledge.builtin.workflows.ticket_to_pr import STEPS
+from fledge import engine
 from fledge.core import Trigger
-from fledge.store import WorkflowRef
+from fledge.github import GitHubIssues
+from fledge.github.issues import MissingTokenError
+from fledge.harnesses import ClaudeCode
+from fledge.store import Store, WorkflowRef
 from fledge.workflows import (
+    SnapshotLoader,
     load_workflows,
     read_snapshot,
+    snapshot_hash,
     start_triggers,
     write_github_workflow,
 )
 
 TICKETS = """\
-from fledge.core import Workflow
+from fledge import Run, workflow
 
-from .shared import Noop, StartsFake
+from .shared import StartsFake
 
-tickets = Workflow(name="tickets", trigger=StartsFake(), steps=[Noop("a"), Noop("b")])
+
+@workflow(trigger=StartsFake())
+def tickets(run: Run) -> None:
+    pass
+"""
+AGENTS = """\
+from fledge import Agent
+
+from .shared import FakeHarness
+
+helper = Agent("helper", FakeHarness())
 """
 SHARED = """\
 class FakeTrigger:
@@ -35,18 +50,16 @@ class FakeTrigger:
         return []
 
 
-class Noop:
-    def __init__(self, name):
-        self.name = name
-
-    def run(self, ctx):
-        return {}
-
-
 class StartsFake:
     def start(self):
         return FakeTrigger()
+
+
+class FakeHarness:
+    def run_turn(self, turn, on_event):
+        raise AssertionError("not prompted in these tests")
 """
+FILES = {"tickets.py": TICKETS, "agents.py": AGENTS, "shared.py": SHARED}
 
 
 def write(directory: Path, files: dict[str, str]) -> Path:
@@ -83,57 +96,88 @@ def test_snapshot_rejects_a_missing_or_empty_directory(tmp_path: Path) -> None:
         read_snapshot(tmp_path)
 
 
-def test_workflows_are_found_across_modules_with_relative_imports() -> None:
-    workflows = load_workflows({"tickets.py": TICKETS, "shared.py": SHARED})
+def test_workflows_and_agents_are_found_across_modules() -> None:
+    loaded = load_workflows(FILES)
 
-    assert list(workflows) == ["tickets"]
-    assert [step.name for step in workflows["tickets"].steps] == ["a", "b"]
+    assert list(loaded.workflows) == ["tickets"]
+    assert list(loaded.agents) == ["helper"]
+    assert type(loaded.agents["helper"].harness).__name__ == "FakeHarness"
 
 
-def test_a_workflow_imported_into_another_module_counts_once() -> None:
-    reexport = "from .tickets import tickets\n"
+def test_a_value_imported_into_another_module_counts_once() -> None:
+    reexport = "from .agents import helper\nfrom .tickets import tickets\n"
 
-    workflows = load_workflows(
-        {"tickets.py": TICKETS, "shared.py": SHARED, "zz.py": reexport}
-    )
+    loaded = load_workflows(FILES | {"zz.py": reexport})
 
-    assert list(workflows) == ["tickets"]
+    assert list(loaded.workflows) == ["tickets"]
+    assert list(loaded.agents) == ["helper"]
+
+
+def test_loading_a_snapshot_again_returns_the_same_objects() -> None:
+    files = FILES | {"marker.py": "# loaded twice\n"}
+
+    first = load_workflows(files)
+    second = load_workflows(dict(files))
+
+    assert second is first
+    tickets = first.workflows["tickets"]
+    # Step containers find functions by this reference, so it must not depend
+    # on the process that loads the snapshot.
+    package = f"fledge_workflows_{snapshot_hash(files)[:16]}"
+    assert engine.ref(tickets.fn) == f"{package}.tickets:tickets"
 
 
 def test_two_snapshots_in_one_process_stay_apart() -> None:
-    first = load_workflows({"tickets.py": TICKETS, "shared.py": SHARED})
-    renamed = TICKETS.replace('name="tickets"', 'name="renamed"')
-    second = load_workflows({"tickets.py": renamed, "shared.py": SHARED})
+    first = load_workflows(FILES)
+    renamed = TICKETS.replace("def tickets(", "def renamed(")
+    second = load_workflows(FILES | {"tickets.py": renamed})
 
-    assert list(first) == ["tickets"]
-    assert list(second) == ["renamed"]
+    assert list(first.workflows) == ["tickets"]
+    assert list(second.workflows) == ["renamed"]
+    assert first.agents["helper"] is not second.agents["helper"]
 
 
 @pytest.mark.parametrize(
     ("files", "error"),
     [
-        (
-            {"tickets.py": TICKETS, "shared.py": SHARED, "copy.py": TICKETS},
-            "two workflows are named 'tickets'",
-        ),
+        (FILES | {"copy.py": TICKETS}, "two workflows are named 'tickets'"),
+        (FILES | {"copy.py": AGENTS}, "two agents are named 'helper'"),
         ({"shared.py": SHARED}, "define no module-level Workflow"),
     ],
 )
-def test_load_rejects_duplicate_or_missing_workflows(
+def test_load_rejects_duplicate_names_or_no_workflow(
     files: dict[str, str], error: str
 ) -> None:
     with pytest.raises(ValueError, match=error):
         load_workflows(files)
 
 
-def test_start_triggers_binds_each_workflow_to_its_snapshot() -> None:
-    workflows = load_workflows({"tickets.py": TICKETS, "shared.py": SHARED})
+@pytest.mark.anyio
+async def test_snapshot_loader_returns_the_stored_snapshots_workflow(
+    database_url: str,
+) -> None:
+    edited = FILES | {"tickets.py": TICKETS.replace("pass", "return None")}
+    load_workflows(edited)
+    async with Store(database_url) as store:
+        await store.save_snapshot(snapshot_hash(FILES), FILES)
+        loader = SnapshotLoader(store)
 
-    [(name, binding)] = start_triggers("abc123", workflows).items()
+        workflow = await loader.workflow(snapshot_hash(FILES), "tickets")
+
+        assert workflow is load_workflows(FILES).workflows["tickets"]
+        assert workflow is not load_workflows(edited).workflows["tickets"]
+        with pytest.raises(LookupError, match="no workflow 'missing'"):
+            await loader.workflow(snapshot_hash(FILES), "missing")
+
+
+def test_start_triggers_binds_each_workflow_to_its_snapshot() -> None:
+    loaded = load_workflows(FILES)
+
+    [(name, binding)] = start_triggers("abc123", loaded.workflows).items()
 
     assert name == "tickets"
     assert isinstance(binding.trigger, Trigger)
-    assert binding.workflow == WorkflowRef("tickets", ("a", "b"), "abc123")
+    assert binding.workflow == WorkflowRef("tickets", "abc123")
 
 
 def test_github_issues_reads_the_token_only_when_started() -> None:
@@ -143,14 +187,25 @@ def test_github_issues_reads_the_token_only_when_started() -> None:
         spec.start()
 
 
-def test_written_github_workflow_loads_with_its_trigger(tmp_path: Path) -> None:
-    path = write_github_workflow(tmp_path / "workflows", "tickets", "acme/api", "ai")
+def test_written_github_workflows_load_with_their_triggers_and_agents(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "workflows"
+    write_github_workflow(directory, "tickets", "acme/api", 'ai "now"')
+    write_github_workflow(directory, "bugs", "acme/web", "bug")
 
-    workflows = load_workflows(read_snapshot(path.parent).files)
+    loaded = load_workflows(read_snapshot(directory).files)
 
-    workflow = workflows["tickets"]
-    assert workflow.trigger == GitHubIssues(repo="acme/api", label="ai")
-    assert [step.name for step in workflow.steps] == [step.name for step in STEPS]
+    tickets = loaded.workflows["tickets"]
+    assert tickets.trigger == GitHubIssues(repo="acme/api", label='ai "now"')
+    assert loaded.workflows["bugs"].trigger == GitHubIssues(
+        repo="acme/web", label="bug"
+    )
+    assert sorted(loaded.agents) == ["bugs_implementer", "tickets_implementer"]
+    assert isinstance(loaded.agents["tickets_implementer"].harness, ClaudeCode)
+    prompt = vars(sys.modules[tickets.fn.__module__])["IMPLEMENT"]
+    assert prompt.startswith("Resolve this ticket")
+    assert "Title: {work.title}\nLink: {work.url}\n\n{work.body}\n" in prompt
 
 
 def test_write_github_workflow_does_not_overwrite(tmp_path: Path) -> None:

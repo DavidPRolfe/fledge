@@ -1,11 +1,16 @@
-"""The types and interfaces that extensions implement."""
+"""The types and interfaces that workflow code and extensions use."""
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
+
+from pydantic import JsonValue
+
+if TYPE_CHECKING:
+    from fledge.agents import Agent
 
 
 @dataclass(frozen=True)
@@ -22,12 +27,6 @@ class Comment:
     external_id: str
     author: str
     body: str
-
-
-@dataclass(frozen=True)
-class TurnResult:
-    session_id: str
-    final_message: str
 
 
 class TriggerCheckError(RuntimeError):
@@ -70,20 +69,83 @@ class TriggerSpec(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class Service:
+    """A container started next to a step's container and removed with it.
+
+    The step reaches it by `name`. With `ready_port` set, the step does not
+    start until a TCP connection to that port succeeds.
+    """
+
+    name: str
+    image: str
+    env: Mapping[str, str] = field(default_factory=dict)
+    ready_port: int | None = None
+
+
+@dataclass(frozen=True)
+class Sandbox:
+    """What a step's container gets besides the image: services and environment."""
+
+    services: Sequence[Service] = ()
+    env: Mapping[str, str] = field(default_factory=dict)
+
+
+NO_SANDBOX = Sandbox()
+
+
+@dataclass(frozen=True)
+class Repo:
+    url: str
+    path: Path
+    """A directory inside the run's workspace."""
+    branch: str
+    """The run's working branch, created by clone_repo."""
+    base: str
+    """The repository's default branch."""
+
+
+@dataclass(frozen=True)
+class Run:
+    """What a workflow function is called with."""
+
+    id: UUID
+    work: WorkItem
+
+
+@dataclass(frozen=True)
+class Workflow:
+    name: str
+    trigger: TriggerSpec
+    fn: Callable[[Run], None]
+
+
+@dataclass(frozen=True)
+class Turn:
+    prompt: str
+    workdir: Path
+    state_dir: Path
+    """Where the harness keeps session state. It outlives the container, so a
+    later turn in another container can resume the session."""
+    session_id: str | None
+    """None on an agent's first turn in a run."""
+    output_schema: Mapping[str, JsonValue] | None = None
+    """JSON Schema the agent's final answer must satisfy."""
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    session_id: str
+    final_message: str
+    structured: JsonValue = None
+    """The final answer as JSON when the turn had an output schema."""
+
+
 @runtime_checkable
 class Harness(Protocol):
-    def run_turn(
-        self,
-        workspace: Path,
-        prompt: str,
-        session_id: str | None,
-        on_event: Callable[[str], None],
-    ) -> TurnResult:
-        """Run the agent until it yields. Raise if the agent fails.
-
-        `session_id` is None on the first turn; pass the returned one back to
-        continue the same conversation.
-        """
+    def run_turn(self, turn: Turn, on_event: Callable[[str], None]) -> TurnResult:
+        """Run the agent until it yields. Raise if the agent fails, or if
+        `turn.session_id` cannot be resumed."""
         ...
 
 
@@ -99,11 +161,6 @@ class StepContext(Protocol):
         """Directory shared by all steps of the run."""
         ...
 
-    @property
-    def outputs(self) -> Mapping[str, Mapping[str, str]]:
-        """Outputs of earlier steps, by step name."""
-        ...
-
     def log(self, message: str) -> None: ...
 
     def agent_event(self, message: str) -> None: ...
@@ -112,25 +169,6 @@ class StepContext(Protocol):
         """Undelivered guidance for the run. Claiming marks it delivered."""
         ...
 
-    def harness(self, name: str) -> Harness: ...
-
-
-class Step(Protocol):
-    @property
-    def name(self) -> str: ...
-
-    def run(self, ctx: StepContext) -> dict[str, str]:
-        """Do the work. Return outputs for later steps. Raise to fail the run."""
+    def agent(self, name: str) -> "Agent":
+        """The agent of that name in the run's workflow code."""
         ...
-
-
-@dataclass(frozen=True)
-class Workflow:
-    name: str
-    trigger: TriggerSpec
-    steps: Sequence[Step]
-
-    def __post_init__(self) -> None:
-        names = [step.name for step in self.steps]
-        if len(set(names)) != len(names):
-            raise ValueError(f"workflow {self.name!r} has duplicate step names")
