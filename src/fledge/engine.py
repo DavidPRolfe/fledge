@@ -13,7 +13,7 @@ import logging
 from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Concatenate, Literal, Protocol, overload
 from uuid import UUID
 
@@ -91,6 +91,8 @@ class PendingCall:
     poll: Callable[[datetime], JsonValue | None] | None
     """For a wait: evaluates it once, given when the wait began. None means
     it is still pending."""
+    poll_interval: timedelta | None = None
+    """For a wait: how often to poll it, if not the control plane's interval."""
 
 
 class _Suspend(BaseException):
@@ -183,6 +185,7 @@ def record(  # noqa: PLR0913 - one argument per journal column
     *,
     sandbox: Sandbox = NO_SANDBOX,
     poll: Callable[[datetime], JsonValue | None] | None = None,
+    poll_interval: timedelta | None = None,
 ) -> JsonValue:
     """The recorded result of the workflow's next call, or suspend the run on it."""
     state = _state()
@@ -202,7 +205,9 @@ def record(  # noqa: PLR0913 - one argument per journal column
         if entry.status == "failed":
             raise StepFailed(entry.error or f"{name} failed")
     raise _Suspend(
-        PendingCall(position, kind, name, function, args, sandbox, entry, poll)
+        PendingCall(
+            position, kind, name, function, args, sandbox, entry, poll, poll_interval
+        )
     )
 
 

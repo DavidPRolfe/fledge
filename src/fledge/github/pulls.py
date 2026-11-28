@@ -37,6 +37,15 @@ NO_CHECKS_GRACE = timedelta(minutes=2)
 """How long after a wait begins a pull request may have no checks at all
 before it counts as having none, rather than CI not having registered yet."""
 
+NO_WORKFLOWS_GRACE = timedelta(seconds=15)
+"""NO_CHECKS_GRACE for a head commit with no GitHub Actions workflows. CI run
+by other services still gets this long to report a first status."""
+
+CI_POLL_INTERVAL = timedelta(seconds=10)
+"""How often `checks_green` is polled. Shorter than the control plane's
+interval, so a run moves on soon after CI finishes; `merged`, which makes more
+requests per poll and waits on people, keeps the control plane's interval."""
+
 LOG_TAIL_LINES = 50
 
 _FAILED_CONCLUSIONS = frozenset(
@@ -150,6 +159,10 @@ class _ReviewComment(BaseModel):
     created_at: datetime
 
 
+class _ContentEntry(BaseModel):
+    name: str
+
+
 class _GraphQLError(BaseModel):
     message: str
 
@@ -162,6 +175,7 @@ _PULLS = TypeAdapter(list[_PullRequest])
 _REVIEWS = TypeAdapter(list[_Review])
 _REVIEW_COMMENTS = TypeAdapter(list[_ReviewComment])
 _ISSUE_COMMENTS = TypeAdapter(list[api.IssueComment])
+_DIRECTORY = TypeAdapter(list[_ContentEntry])
 
 
 def _github_repo(repo_url: str) -> tuple[str, str]:
@@ -425,6 +439,18 @@ def _ci(client: httpx.Client, pr: PullRequest, sha: str) -> _Ci:
     return _Ci(failures, pending, bool(runs or statuses or more_coming))
 
 
+def _has_actions_workflows(client: httpx.Client, pr: PullRequest, sha: str) -> bool:
+    owner, name = _github_repo(pr.repo.url)
+    response = client.get(
+        f"/repos/{owner}/{name}/contents/.github/workflows", params={"ref": sha}
+    )
+    if response.status_code == httpx.codes.NOT_FOUND:
+        return False
+    response.raise_for_status()
+    entries = _DIRECTORY.validate_json(response.content)
+    return any(entry.name.endswith((".yml", ".yaml")) for entry in entries)
+
+
 def ci_verdict(
     client: httpx.Client, pr: PullRequest, started_at: datetime, now: datetime
 ) -> Verdict:
@@ -442,9 +468,14 @@ def ci_verdict(
     # Counted from when the wait began, not from the loop's last feedback:
     # the agent's fix may take longer than the grace period, and its push
     # must still get the whole period for CI to register.
-    if not ci.reported and now < started_at + NO_CHECKS_GRACE:
-        return Pending()
-    return Passed()
+    if ci.reported or now >= started_at + NO_CHECKS_GRACE:
+        return Passed()
+    # GitHub Actions can take a while to register its first check run, but a
+    # commit without workflows has no Actions CI to wait for.
+    registering = now < started_at + NO_WORKFLOWS_GRACE or _has_actions_workflows(
+        client, pr, state.head.sha
+    )
+    return Pending() if registering else Passed()
 
 
 def _review_feedback(
@@ -508,7 +539,7 @@ def review_verdict(client: httpx.Client, pr: PullRequest, since: datetime) -> Ve
     return Feedback(items) if items else Pending()
 
 
-@wait
+@wait(poll_interval=CI_POLL_INTERVAL)
 def checks_green(ctx: WaitContext, pr: PullRequest) -> Verdict:
     """Passes when the pull request's checks pass; feedback when one fails."""
     # The one place a check reads the real clock: waits may, workflow bodies may not.

@@ -259,6 +259,8 @@ class FakeGitHub:
     review_comments: list[Json] = field(default_factory=list)
     issue_comments: list[Json] = field(default_factory=list)
     graphql_errors: list[Json] = field(default_factory=list)
+    workflow_files: list[str] | None = field(default_factory=lambda: ["ci.yml"])
+    """What the head commit's .github/workflows holds; None if it is absent."""
     login: str = "fledge-bot"
     page_size: int = 100
     requests: list[httpx.Request] = field(default_factory=list)
@@ -270,8 +272,6 @@ class FakeGitHub:
             return httpx.Response(200, text=str(self.logs[int(path.split("/")[-1])]))
         if path.startswith(f"{REPO}/actions/jobs/"):
             return self._job_log(int(path.split("/")[-2]))
-        if path == "/graphql":
-            return httpx.Response(200, json={"data": {}, "errors": self.graphql_errors})
         if self.checks_forbidden and path.endswith("/check-runs"):
             return httpx.Response(403, json={"message": "Resource not accessible"})
         paged: dict[str, tuple[list[Json], Callable[[list[Json]], Json]]] = {
@@ -297,6 +297,8 @@ class FakeGitHub:
         }
         if path in paged:
             return self._page(request, *paged[path])
+        if path == f"{REPO}/contents/.github/workflows":
+            return self._workflows(request)
         bodies: dict[str, Json | list[Json]] = {
             f"{REPO}/pulls": self.open_pulls,
             f"{REPO}/pulls/5": self._pull(),
@@ -304,6 +306,7 @@ class FakeGitHub:
             f"{REPO}/pulls/5/comments": self.review_comments,
             f"{REPO}/issues/5/comments": self.issue_comments,
             "/user": user(self.login),
+            "/graphql": {"data": {}, "errors": self.graphql_errors},
         }
         return httpx.Response(200, json=bodies[path])
 
@@ -327,6 +330,15 @@ class FakeGitHub:
             headers["Link"] = f'<{next_url}>; rel="next"'
         return httpx.Response(
             200, json=wrap(items[start : start + self.page_size]), headers=headers
+        )
+
+    def _workflows(self, request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("ref") != SHA:
+            return httpx.Response(422, json={"message": "wrong ref"})
+        if self.workflow_files is None:
+            return httpx.Response(404, json={"message": "Not Found"})
+        return httpx.Response(
+            200, json=[{"name": name, "type": "file"} for name in self.workflow_files]
         )
 
     def _pull(self) -> Json:
@@ -523,6 +535,30 @@ LOG = "\n".join(f"log line {n}" for n in range(60))
             SINCE + pulls.NO_CHECKS_GRACE,
             Passed(),
             id="no-checks-after-grace",
+        ),
+        pytest.param(
+            FakeGitHub(workflow_files=None),
+            SINCE + timedelta(seconds=14),
+            Pending(),
+            id="no-workflows-within-short-grace",
+        ),
+        pytest.param(
+            FakeGitHub(workflow_files=None),
+            SINCE + pulls.NO_WORKFLOWS_GRACE,
+            Passed(),
+            id="no-workflows-after-short-grace",
+        ),
+        pytest.param(
+            FakeGitHub(workflow_files=["README.md"]),
+            SINCE + pulls.NO_WORKFLOWS_GRACE,
+            Passed(),
+            id="workflows-directory-without-workflows",
+        ),
+        pytest.param(
+            FakeGitHub(workflow_files=["ci.yaml"]),
+            SINCE + pulls.NO_WORKFLOWS_GRACE,
+            Pending(),
+            id="workflows-not-registered-yet",
         ),
         pytest.param(
             FakeGitHub(statuses=[status("ci/legacy", "error")]),

@@ -4,7 +4,7 @@ import shlex
 import subprocess
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Concatenate, Literal, Protocol, overload
 
 from pydantic import Field, JsonValue, TypeAdapter
@@ -170,6 +170,7 @@ class _WaitCheck:
     fn: Callable[..., Verdict]
     args: tuple[object, ...]
     kwargs: dict[str, object]
+    poll_interval: timedelta | None
 
     def evaluate(self, since: datetime) -> Settled:
         run = engine.current_run()
@@ -187,25 +188,53 @@ class _WaitCheck:
             "since": since.isoformat(),
         }
         result = engine.record(
-            "wait", self.fn.__name__, engine.ref(self.fn), recorded, poll=poll
+            "wait",
+            self.fn.__name__,
+            engine.ref(self.fn),
+            recorded,
+            poll=poll,
+            poll_interval=self.poll_interval,
         )
         return _SETTLED.validate_python(result)
 
 
+type WaitFunction[**P] = Callable[Concatenate[WaitContext, P], Verdict]
+
+
+@overload
+def wait[**P](fn: WaitFunction[P], /) -> Callable[P, Check]: ...
+
+
+@overload
 def wait[**P](
-    fn: Callable[Concatenate[WaitContext, P], Verdict], /
-) -> Callable[P, Check]:
+    *, poll_interval: timedelta
+) -> Callable[[WaitFunction[P]], Callable[P, Check]]: ...
+
+
+def wait[**P](
+    fn: WaitFunction[P] | None = None,
+    /,
+    *,
+    poll_interval: timedelta | None = None,
+) -> Callable[P, Check] | Callable[[WaitFunction[P]], Callable[P, Check]]:
     """Make a function a check that the control plane polls, with no container.
 
     The function takes a WaitContext first and is called again each poll
-    until it returns something other than Pending. It may do I/O.
+    until it returns something other than Pending. It may do I/O. It is polled
+    every `poll_interval` if given, else every FLEDGE_POLL_INTERVAL_SECONDS.
     """
-    engine.ref(fn)
 
-    def build(*args: P.args, **kwargs: P.kwargs) -> Check:
-        return _WaitCheck(fn, args, kwargs)
+    def decorate(decorated: WaitFunction[P]) -> Callable[P, Check]:
+        engine.ref(decorated)
 
-    return build
+        def build(*args: P.args, **kwargs: P.kwargs) -> Check:
+            return _WaitCheck(decorated, args, kwargs, poll_interval)
+
+        return build
+
+    if fn is not None:
+        return decorate(fn)
+    return decorate
 
 
 @check

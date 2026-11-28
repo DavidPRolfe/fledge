@@ -163,8 +163,8 @@ flowchart TB
    the step is marked failed and the call raises `StepFailed` in the workflow.
 7. **Wait.** If the run is suspended on a wait, the orchestrator inserts a
    `calls` row for it (no container, no token) and, every
-   `FLEDGE_POLL_INTERVAL_SECONDS`, calls the wait function in the control
-   plane. Pending keeps the run suspended; any other verdict is recorded as
+   `FLEDGE_POLL_INTERVAL_SECONDS` or the wait's own `poll_interval`, calls
+   the wait function in the control plane. Pending keeps the run suspended; any other verdict is recorded as
    the call's result and the next replay carries on from it.
 8. **Finish.** When the function returns, the run is `succeeded`. When it
    raises, the run is `failed` with the exception as its error. When a check
@@ -254,7 +254,9 @@ push the same way.
   check runs and statuses have all finished without a failure. Failures are
   feedback, with the last 50 lines of the job log for GitHub Actions jobs. A
   commit with no checks at all counts as pending for two minutes after the
-  loop starts, then as passed. A closed pull request stops the run.
+  loop starts, then as passed; if it has no GitHub Actions workflows, for 15
+  seconds. A closed pull request stops the run. It is polled every 10
+  seconds, so a run moves on soon after CI finishes.
 - `merged` passes when the pull request is merged and stops the run when it
   is closed unmerged. Otherwise new reviews, review comments and conversation
   comments since `since`, and failing checks, are feedback. Comments by bots
@@ -531,6 +533,10 @@ def tests_pass(ctx: StepContext, repo: Repo) -> Passed | Feedback: ...
 def release_approved(ctx: WaitContext, ticket: str) -> Verdict: ...
 
 
+@wait(poll_interval=timedelta(seconds=10))
+def deploy_finished(ctx: WaitContext, release: str) -> Verdict: ...
+
+
 @dataclass(frozen=True)
 class WaitContext:
     run: Run
@@ -544,7 +550,8 @@ Calling `tests_pass(repo)` or `release_approved(ticket)` in a workflow builds
 a check for `until`. A `@check` runs in a container like a step, and
 `tests_pass.within(sandbox)` gives the same check with another sandbox. A
 `@wait` runs in the control plane, in a thread, each poll until it returns
-something other than `Pending`. It may do I/O and read the clock; its
+something other than `Pending`, every `FLEDGE_POLL_INTERVAL_SECONDS` unless
+it gives its own `poll_interval`. It may do I/O and read the clock; its
 arguments must be JSON-serialisable, since they are recorded. `Feedback`
 holds `FeedbackItem(author, body)` items, which `Agent.prompt` renders as a
 request to address the findings.
@@ -635,7 +642,7 @@ FLEDGE_IMAGE=fledge:dev
 FLEDGE_API_URL=http://fledge:8000      # where step containers reach the control plane
 FLEDGE_DOCKER_NETWORK=fledge           # network step containers join
 FLEDGE_MAX_CONCURRENT_STEPS=1          # step containers running at once, across runs
-FLEDGE_POLL_INTERVAL_SECONDS=30        # triggers and waits
+FLEDGE_POLL_INTERVAL_SECONDS=30        # triggers, and waits without their own poll_interval
 FLEDGE_STEP_TIMEOUT_MINUTES=60
 FLEDGE_STEP_SECRETS=GITHUB_TOKEN,ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN  # passed to steps when set
 FLEDGE_WORKFLOWS_DIR=workflows        # Python files defining the workflows

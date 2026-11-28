@@ -209,9 +209,14 @@ class Orchestrator:
             await self._store.append_event(
                 run.id, "state", f"waiting on {call.name}", entry.id
             )
+        interval = (
+            self._config.poll_interval_seconds
+            if call.poll_interval is None
+            else call.poll_interval.total_seconds()
+        )
         now = time.monotonic()
         last = self._last_polled.get(entry.id)
-        if last is not None and now - last < self._config.poll_interval_seconds:
+        if last is not None and now - last < interval:
             return
         # Set before polling so that a poll that raises waits its turn too.
         self._last_polled[entry.id] = now

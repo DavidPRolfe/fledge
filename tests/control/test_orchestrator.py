@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import timedelta
 from uuid import UUID
 
 import pytest
@@ -95,12 +96,26 @@ def until_green(run: core.Run) -> None:
         fix(render_feedback(feedback))
 
 
+@wait(poll_interval=timedelta(0))
+def eager_ci(ctx: WaitContext) -> Verdict:
+    return VERDICTS.pop(0) if VERDICTS else Pending()
+
+
+@workflow(trigger=_NoTrigger())
+def until_eager_green(run: core.Run) -> None:
+    for feedback in until(eager_ci(), max_rounds=3):
+        fix(render_feedback(feedback))
+
+
 @workflow(trigger=_NoTrigger())
 def sandboxed(run: core.Run) -> None:
     integration_tests()
 
 
-WORKFLOWS = {wf.name: wf for wf in [two_steps, tolerant, until_green, sandboxed]}
+WORKFLOWS = {
+    wf.name: wf
+    for wf in [two_steps, tolerant, until_green, until_eager_green, sandboxed]
+}
 
 
 async def load_workflow(snapshot_hash: str, name: str) -> engine.Workflow:
@@ -530,6 +545,19 @@ async def test_wait_polls_at_most_every_interval(
 
     # A restarted control plane does not know when it last polled.
     await orchestrator(store, runner, poll_interval_seconds=3600).tick()
+    assert VERDICTS == []
+    assert (await latest_call(store, run)).status == "succeeded"
+
+
+async def test_a_wait_with_its_own_poll_interval_ignores_the_configured_one(
+    store: Store, runner: FakeRunner
+) -> None:
+    orch = orchestrator(store, runner, poll_interval_seconds=3600)
+    run = await make_run(store, until_eager_green)
+    VERDICTS.extend([Pending(), Passed()])
+
+    await orch.tick()
+    await orch.tick()
     assert VERDICTS == []
     assert (await latest_call(store, run)).status == "succeeded"
 
